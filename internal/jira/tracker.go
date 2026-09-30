@@ -34,6 +34,12 @@ type Tracker struct {
 	priorityMap      map[string]string                 // beads priority → Jira priority name (from jira.priority_map.* config)
 	customFields     map[string]interface{}            // Jira field name/id → value (from jira.custom_fields.* config)
 	typeCustomFields map[string]map[string]interface{} // Jira issue type → Jira field name/id → value
+
+	// Hierarchy link custom fields (Jira Server/DC). Resolved lazily on the
+	// first fetch from config or by discovery; empty means not available.
+	epicLinkField     string
+	parentLinkField   string
+	hierarchyResolved bool
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -188,7 +194,46 @@ func (t *Tracker) Validate() error {
 
 func (t *Tracker) Close() error { return nil }
 
+// resolveHierarchyFields determines the Epic Link and Parent Link custom
+// field IDs from jira.epic_link_field / jira.parent_link_field, discovering
+// them from the field list when neither is configured. "none" disables a
+// field. Discovery failures are logged and leave hierarchy import to the
+// standard parent field only.
+func (t *Tracker) resolveHierarchyFields(ctx context.Context) {
+	if t.hierarchyResolved {
+		return
+	}
+	t.hierarchyResolved = true
+
+	epicLink, _ := t.getConfig(ctx, "jira.epic_link_field", "JIRA_EPIC_LINK_FIELD")
+	parentLink, _ := t.getConfig(ctx, "jira.parent_link_field", "JIRA_PARENT_LINK_FIELD")
+	if epicLink == "" && parentLink == "" {
+		discEpic, discParent, err := t.client.DiscoverHierarchyFields(ctx)
+		if err != nil {
+			debug.Logf("jira: hierarchy field discovery failed, using parent field only: %v\n", err)
+		}
+		epicLink, parentLink = discEpic, discParent
+	}
+	for _, f := range []*string{&epicLink, &parentLink} {
+		if strings.EqualFold(strings.TrimSpace(*f), "none") {
+			*f = ""
+		}
+	}
+	t.epicLinkField, t.parentLinkField = epicLink, parentLink
+	debug.Logf("jira: hierarchy fields: epic_link=%q parent_link=%q\n", epicLink, parentLink)
+
+	var extra []string
+	for _, f := range []string{epicLink, parentLink} {
+		if f != "" {
+			extra = append(extra, f)
+		}
+	}
+	t.client.ExtraFields = extra
+}
+
 func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
+	t.resolveHierarchyFields(ctx)
+
 	// Build JQL query — use IN clause for multi-project.
 	var jql string
 	if len(t.projectKeys) == 1 {
@@ -249,6 +294,7 @@ func updatedSinceJQL(since, now time.Time) string {
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
+	t.resolveHierarchyFields(ctx)
 	issue, err := t.client.GetIssue(ctx, identifier)
 	if err != nil {
 		return nil, err
@@ -345,6 +391,8 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 		priorityMap:      t.priorityMap,
 		customFields:     t.customFields,
 		typeCustomFields: t.typeCustomFields,
+		epicLinkField:    t.epicLinkField,
+		parentLinkField:  t.parentLinkField,
 	}
 }
 

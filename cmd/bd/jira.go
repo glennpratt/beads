@@ -35,6 +35,13 @@ Self-hosted Jira (Server/Data Center):
   bd config set jira.client_key "~/certs/me.key"
   bd config set jira.ca_cert "~/certs/corp-root.crt"  # Extra trusted CA
 
+Hierarchy (pulled as parent-child dependencies; parents must be pulled too):
+  The standard parent field (sub-tasks; all levels on Jira Cloud) is always
+  used. On Server/DC the Epic Link and Parent Link (Advanced Roadmaps) custom
+  fields are discovered automatically; override or disable ("none") with:
+  bd config set jira.epic_link_field "customfield_10008"
+  bd config set jira.parent_link_field "none"
+
 Environment variables (alternative to config):
   JIRA_API_TOKEN   - Jira API token
   JIRA_USERNAME    - Jira username/email

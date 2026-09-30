@@ -42,6 +42,67 @@ type IssueFields struct {
 	Created     string           `json:"created"`
 	Updated     string           `json:"updated"`
 	Resolution  *ResolutionField `json:"resolution"`
+	Parent      *ParentField     `json:"parent,omitempty"` // sub-task parent; on Jira Cloud also the epic
+
+	// Custom holds raw "customfield_*" values (e.g. Epic Link, Parent Link),
+	// keyed by field ID. Populated on unmarshal only.
+	Custom map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes the known fields and keeps customfield_* values in Custom.
+func (f *IssueFields) UnmarshalJSON(data []byte) error {
+	type plain IssueFields
+	if err := json.Unmarshal(data, (*plain)(f)); err != nil {
+		return err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return err
+	}
+	for k, v := range all {
+		if !strings.HasPrefix(k, "customfield_") || string(v) == "null" {
+			continue
+		}
+		if f.Custom == nil {
+			f.Custom = make(map[string]json.RawMessage)
+		}
+		f.Custom[k] = v
+	}
+	return nil
+}
+
+// ParentField references an issue's parent (sub-task parent, or on Jira
+// Cloud any hierarchy parent such as the epic).
+type ParentField struct {
+	ID  string `json:"id"`
+	Key string `json:"key"`
+}
+
+// CustomFieldKey returns the issue key held in a custom field, for issue
+// picker fields such as Epic Link and Parent Link. Server/DC returns a bare
+// key string; object forms carrying a "key" are also accepted.
+func (f *IssueFields) CustomFieldKey(fieldID string) string {
+	raw, ok := f.Custom[fieldID]
+	if fieldID == "" || !ok {
+		return ""
+	}
+	var key string
+	if err := json.Unmarshal(raw, &key); err == nil {
+		return strings.TrimSpace(key)
+	}
+	var obj struct {
+		Key  string `json:"key"`
+		Data struct {
+			Key string `json:"key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		if obj.Key != "" {
+			return strings.TrimSpace(obj.Key)
+		}
+		return strings.TrimSpace(obj.Data.Key)
+	}
+	return ""
 }
 
 // StatusField represents a Jira issue status.
@@ -118,6 +179,10 @@ type Client struct {
 	APIToken   string
 	APIVersion string // "2" or "3" (default: "3")
 	HTTPClient *http.Client
+
+	// ExtraFields are additional field IDs (e.g. Epic Link / Parent Link
+	// custom fields) requested alongside searchFields.
+	ExtraFields []string
 }
 
 // NewClient creates a new Jira client.
@@ -236,7 +301,64 @@ func (c *Client) FetchIssueTimestamp(ctx context.Context, jiraKey string) (time.
 }
 
 // searchFields is the default set of fields to request in search/get queries.
-const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution"
+const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution,parent"
+
+// requestFields returns searchFields plus any configured ExtraFields.
+func (c *Client) requestFields() string {
+	if len(c.ExtraFields) == 0 {
+		return searchFields
+	}
+	return searchFields + "," + strings.Join(c.ExtraFields, ",")
+}
+
+// Field describes a Jira field from GET /field.
+type Field struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Custom bool   `json:"custom"`
+	Schema struct {
+		Type   string `json:"type"`
+		Custom string `json:"custom"`
+	} `json:"schema"`
+}
+
+// Custom field plugin types for Jira Server/DC hierarchy links.
+const (
+	epicLinkFieldType   = "com.pyxis.greenhopper.jira:gh-epic-link"   // Story -> Epic
+	parentLinkFieldType = "com.atlassian.jpo:jpo-custom-field-parent" // Advanced Roadmaps: Epic -> higher levels
+)
+
+// GetFields lists all Jira fields (system and custom).
+func (c *Client) GetFields(ctx context.Context) ([]Field, error) {
+	body, err := c.doRequest(ctx, "GET", c.apiBase()+"/field", nil)
+	if err != nil {
+		return nil, fmt.Errorf("list fields: %w", err)
+	}
+	var fields []Field
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, fmt.Errorf("parse fields response: %w", err)
+	}
+	return fields, nil
+}
+
+// DiscoverHierarchyFields finds the Epic Link and Parent Link custom field
+// IDs by plugin type. Either is empty when the instance does not have it
+// (Jira Cloud uses the standard parent field instead).
+func (c *Client) DiscoverHierarchyFields(ctx context.Context) (epicLink, parentLink string, err error) {
+	fields, err := c.GetFields(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	for _, f := range fields {
+		switch f.Schema.Custom {
+		case epicLinkFieldType:
+			epicLink = f.ID
+		case parentLinkFieldType:
+			parentLink = f.ID
+		}
+	}
+	return epicLink, parentLink, nil
+}
 
 // SearchIssues queries Jira using JQL and returns all matching issues, handling pagination.
 func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) {
@@ -261,7 +383,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) 
 
 		params := url.Values{
 			"jql":        {jql},
-			"fields":     {searchFields},
+			"fields":     {c.requestFields()},
 			"maxResults": {fmt.Sprintf("%d", maxResults)},
 		}
 		if useV2Pagination {
@@ -310,7 +432,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string) ([]Issue, error) 
 
 // GetIssue fetches a single Jira issue by key (e.g., "PROJ-123").
 func (c *Client) GetIssue(ctx context.Context, key string) (*Issue, error) {
-	apiURL := fmt.Sprintf("%s/issue/%s?fields=%s", c.apiBase(), url.PathEscape(key), searchFields)
+	apiURL := fmt.Sprintf("%s/issue/%s?fields=%s", c.apiBase(), url.PathEscape(key), url.QueryEscape(c.requestFields()))
 
 	body, err := c.doRequest(ctx, "GET", apiURL, nil)
 	if err != nil {

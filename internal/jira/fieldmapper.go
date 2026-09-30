@@ -16,6 +16,8 @@ type jiraFieldMapper struct {
 	priorityMap      map[string]string                 // beads priority (as string "0"-"4") → Jira priority name (from jira.priority_map.* config)
 	customFields     map[string]interface{}            // Jira field name/id → value (from jira.custom_fields.* config)
 	typeCustomFields map[string]map[string]interface{} // Jira issue type → field name/id → value
+	epicLinkField    string                            // Epic Link custom field ID (Server/DC), "" if unavailable
+	parentLinkField  string                            // Parent Link custom field ID (Advanced Roadmaps), "" if unavailable
 }
 
 func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
@@ -214,8 +216,41 @@ func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueC
 	}
 
 	return &tracker.IssueConversion{
-		Issue: issue,
+		Issue:        issue,
+		Dependencies: m.parentDependencies(ji),
 	}
+}
+
+// parentDependencies returns parent-child dependencies from the issue's
+// Jira hierarchy: the standard parent field (sub-tasks; all levels on Jira
+// Cloud), Epic Link (story -> epic) and Parent Link (epic -> higher levels).
+// The engine links only parents that exist locally and never removes edges,
+// so local-only parents and children are left untouched.
+func (m *jiraFieldMapper) parentDependencies(ji *Issue) []tracker.DependencyInfo {
+	var parents []string
+	if ji.Fields.Parent != nil {
+		parents = append(parents, strings.TrimSpace(ji.Fields.Parent.Key))
+	}
+	parents = append(parents,
+		ji.Fields.CustomFieldKey(m.epicLinkField),
+		ji.Fields.CustomFieldKey(m.parentLinkField),
+	)
+
+	var deps []tracker.DependencyInfo
+	seen := make(map[string]bool, len(parents))
+	for _, p := range parents {
+		if p == "" || strings.EqualFold(p, ji.Key) || seen[strings.ToUpper(p)] {
+			continue
+		}
+		seen[strings.ToUpper(p)] = true
+		deps = append(deps, tracker.DependencyInfo{
+			FromExternalID: ji.Key,
+			ToExternalID:   p,
+			Type:           string(types.DepParentChild),
+			Source:         tracker.DependencySourceParent,
+		})
+	}
+	return deps
 }
 
 func (m *jiraFieldMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {

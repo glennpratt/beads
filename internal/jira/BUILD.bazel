@@ -24,6 +24,7 @@ go_test(
     srcs = [
         "client_test.go",
         "client_tls_test.go",
+        "hierarchy_test.go",
         "refs_test.go",
         "retry_test.go",
         "tracker_test.go",
