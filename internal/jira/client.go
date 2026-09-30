@@ -3,6 +3,8 @@ package jira
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -119,6 +123,70 @@ func NewClient(url, username, apiToken string) *Client {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// ConfigureTLS sets up mutual TLS and/or a custom CA bundle for Jira instances
+// behind client-certificate authentication (common for self-hosted Jira
+// Server/Data Center). certFile and keyFile must be set together; caFile is
+// optional and is added to the system roots rather than replacing them.
+// Paths may start with "~/". A call with all arguments empty is a no-op.
+func (c *Client) ConfigureTLS(certFile, keyFile, caFile string) error {
+	if certFile == "" && keyFile == "" && caFile == "" {
+		return nil
+	}
+	if (certFile == "") != (keyFile == "") {
+		return fmt.Errorf("jira client certificate and key must be configured together")
+	}
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if certFile != "" {
+		cert, err := tls.LoadX509KeyPair(expandHome(certFile), expandHome(keyFile))
+		if err != nil {
+			return fmt.Errorf("load jira client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+		// Some Jira front ends (e.g. per-path client auth on Apache or F5)
+		// request the client certificate via TLS 1.2 renegotiation after the
+		// initial handshake, which Go refuses by default.
+		tlsConfig.Renegotiation = tls.RenegotiateOnceAsClient
+	}
+
+	if caFile != "" {
+		pem, err := os.ReadFile(expandHome(caFile))
+		if err != nil {
+			return fmt.Errorf("read jira CA certificate: %w", err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("no certificates found in jira CA file %s", caFile)
+		}
+		tlsConfig.RootCAs = pool
+	}
+
+	// Clone the default transport so proxy and timeout settings are kept.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	if c.HTTPClient == nil {
+		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	c.HTTPClient.Transport = transport
+	return nil
+}
+
+// expandHome expands a leading "~/" to the user's home directory.
+func expandHome(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // apiBase returns the versioned REST API base URL, e.g. "https://host/rest/api/3".

@@ -28,10 +28,20 @@ Configuration:
   bd config set jira.push_prefix "hippo"       # Only push hippo-* issues to Jira
   bd config set jira.push_prefix "proj1,proj2" # Multiple prefixes (comma-separated)
 
+Self-hosted Jira (Server/Data Center):
+  bd config set jira.api_version "2"            # REST API v2
+  bd config set jira.api_token "YOUR_PAT"       # No username: sent as Bearer PAT
+  bd config set jira.client_cert "~/certs/me.pem"  # Mutual TLS (with client_key)
+  bd config set jira.client_key "~/certs/me.key"
+  bd config set jira.ca_cert "~/certs/corp-root.crt"  # Extra trusted CA
+
 Environment variables (alternative to config):
-  JIRA_API_TOKEN  - Jira API token
-  JIRA_USERNAME   - Jira username/email
-  JIRA_PROJECTS   - Comma-separated project keys
+  JIRA_API_TOKEN   - Jira API token
+  JIRA_USERNAME    - Jira username/email
+  JIRA_PROJECTS    - Comma-separated project keys
+  JIRA_CLIENT_CERT - Client certificate (PEM) for mutual TLS
+  JIRA_CLIENT_KEY  - Client private key (PEM) for mutual TLS
+  JIRA_CA_CERT     - Additional CA bundle (PEM)
 
 Examples:
   bd jira sync --pull         # Import issues from Jira

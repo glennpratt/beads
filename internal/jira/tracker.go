@@ -84,6 +84,14 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 
 	t.client = NewClient(jiraURL, username, apiToken)
 
+	// Optional mutual TLS / custom CA for self-hosted Jira behind client-cert auth.
+	clientCert, _ := t.getConfig(ctx, "jira.client_cert", "JIRA_CLIENT_CERT")
+	clientKey, _ := t.getConfig(ctx, "jira.client_key", "JIRA_CLIENT_KEY")
+	caCert, _ := t.getConfig(ctx, "jira.ca_cert", "JIRA_CA_CERT")
+	if err := t.client.ConfigureTLS(clientCert, clientKey, caCert); err != nil {
+		return err
+	}
+
 	apiVersion, _ := t.getConfig(ctx, "jira.api_version", "JIRA_API_VERSION")
 	if apiVersion == "" {
 		apiVersion = "3"

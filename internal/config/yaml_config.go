@@ -104,6 +104,9 @@ var YamlOnlyKeys = map[string]bool{
 	"linear.oauth_client_id":     true,
 	"linear.oauth_client_secret": true,
 	"jira.api_token":             true,
+	"jira.client_cert":           true, // mTLS paths are machine-local, not shared state
+	"jira.client_key":            true,
+	"jira.ca_cert":               true,
 	"gitlab.token":               true,
 	"ado.pat":                    true,
 	"notion.token":               true,

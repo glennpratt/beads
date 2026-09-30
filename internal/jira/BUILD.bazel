@@ -23,6 +23,7 @@ go_test(
     name = "jira_test",
     srcs = [
         "client_test.go",
+        "client_tls_test.go",
         "refs_test.go",
         "retry_test.go",
         "tracker_test.go",
