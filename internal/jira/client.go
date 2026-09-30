@@ -437,11 +437,14 @@ func (c *Client) doRequest(ctx context.Context, method, apiURL string, body []by
 			req.Header.Set("Content-Type", "application/json")
 		}
 
+		start := time.Now()
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
+			debug.Logf("jira: %s %s failed after %s (attempt %d/%d): %v\n", method, apiURL, time.Since(start).Round(time.Millisecond), attempt+1, MaxRetries+1, err)
 			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, MaxRetries+1, err)
 			continue
 		}
+		debug.Logf("jira: %s %s -> %d in %s (attempt %d/%d)\n", method, apiURL, resp.StatusCode, time.Since(start).Round(time.Millisecond), attempt+1, MaxRetries+1)
 
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 		_ = resp.Body.Close()
