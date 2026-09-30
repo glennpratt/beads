@@ -72,21 +72,52 @@ func (m *jiraFieldMapper) PriorityToTracker(beadsPriority int) interface{} {
 
 func (m *jiraFieldMapper) StatusToBeads(trackerState interface{}) types.Status {
 	if state, ok := trackerState.(string); ok {
-		// Check custom map first (inverted: jira name → beads status).
-		for beadsStatus, jiraName := range m.statusMap {
-			if strings.EqualFold(state, jiraName) {
-				return types.Status(beadsStatus)
-			}
+		if status, ok := m.statusNameToBeads(state); ok {
+			return status
 		}
-		switch state {
-		case "To Do", "Open", "Backlog", "New":
-			return types.StatusOpen
-		case "In Progress", "In Review":
-			return types.StatusInProgress
-		case "Blocked":
-			return types.StatusBlocked
-		case "Done", "Closed", "Resolved":
+	}
+	return types.StatusOpen
+}
+
+// statusNameToBeads maps a Jira status name via the custom map, then the
+// built-in names. ok is false when the name is not recognized.
+func (m *jiraFieldMapper) statusNameToBeads(state string) (types.Status, bool) {
+	// Check custom map first (inverted: jira name → beads status).
+	for beadsStatus, jiraName := range m.statusMap {
+		if strings.EqualFold(state, jiraName) {
+			return types.Status(beadsStatus), true
+		}
+	}
+	switch state {
+	case "To Do", "Open", "Backlog", "New":
+		return types.StatusOpen, true
+	case "In Progress", "In Review":
+		return types.StatusInProgress, true
+	case "Blocked":
+		return types.StatusBlocked, true
+	case "Done", "Closed", "Resolved":
+		return types.StatusClosed, true
+	}
+	return "", false
+}
+
+// issueStatusToBeads maps a Jira issue's status by name, falling back to the
+// status category for workflow-specific names (e.g. "Cancelled", "Won't Do",
+// "Ready for QA") so finished issues are not imported as open.
+func (m *jiraFieldMapper) issueStatusToBeads(ji *Issue) types.Status {
+	st := ji.Fields.Status
+	if st == nil {
+		return types.StatusOpen
+	}
+	if status, ok := m.statusNameToBeads(st.Name); ok {
+		return status
+	}
+	if st.StatusCategory != nil {
+		switch st.StatusCategory.Key {
+		case "done":
 			return types.StatusClosed
+		case "indeterminate":
+			return types.StatusInProgress
 		}
 	}
 	return types.StatusOpen
@@ -164,7 +195,7 @@ func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueC
 		Title:       ji.Fields.Summary,
 		Description: DescriptionToPlainText(ji.Fields.Description),
 		Priority:    m.PriorityToBeads(priorityName(ji)),
-		Status:      m.StatusToBeads(statusName(ji)),
+		Status:      m.issueStatusToBeads(ji),
 		IssueType:   m.TypeToBeads(typeName(ji)),
 	}
 
@@ -241,13 +272,6 @@ func (m *jiraFieldMapper) IssueToTracker(issue *types.Issue) map[string]interfac
 func priorityName(ji *Issue) string {
 	if ji.Fields.Priority != nil {
 		return ji.Fields.Priority.Name
-	}
-	return ""
-}
-
-func statusName(ji *Issue) string {
-	if ji.Fields.Status != nil {
-		return ji.Fields.Status.Name
 	}
 	return ""
 }
