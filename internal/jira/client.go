@@ -46,8 +46,16 @@ type IssueFields struct {
 
 // StatusField represents a Jira issue status.
 type StatusField struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID             string               `json:"id"`
+	Name           string               `json:"name"`
+	StatusCategory *StatusCategoryField `json:"statusCategory,omitempty"`
+}
+
+// StatusCategoryField is Jira's fixed grouping of workflow statuses. Its Key
+// is one of "new", "indeterminate" or "done", regardless of how a workflow
+// names its statuses.
+type StatusCategoryField struct {
+	Key string `json:"key"`
 }
 
 // PriorityField represents a Jira issue priority.

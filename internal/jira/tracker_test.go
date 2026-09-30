@@ -613,6 +613,65 @@ func TestStatusMapCaseInsensitiveMatch(t *testing.T) {
 	}
 }
 
+func TestIssueStatusToBeadsFallsBackToCategory(t *testing.T) {
+	mapper := &jiraFieldMapper{
+		statusMap: map[string]string{"open": "Triage"},
+	}
+
+	tests := []struct {
+		name   string
+		status *StatusField
+		want   types.Status
+	}{
+		{"nil status", nil, types.StatusOpen},
+		{"known name wins over category", &StatusField{Name: "Closed", StatusCategory: &StatusCategoryField{Key: "new"}}, types.StatusClosed},
+		{"custom map wins over category", &StatusField{Name: "Triage", StatusCategory: &StatusCategoryField{Key: "indeterminate"}}, types.StatusOpen},
+		{"unknown done name", &StatusField{Name: "Cancelled", StatusCategory: &StatusCategoryField{Key: "done"}}, types.StatusClosed},
+		{"unknown in-flight name", &StatusField{Name: "Ready for QA", StatusCategory: &StatusCategoryField{Key: "indeterminate"}}, types.StatusInProgress},
+		{"unknown new name", &StatusField{Name: "Groomed", StatusCategory: &StatusCategoryField{Key: "new"}}, types.StatusOpen},
+		{"unknown name without category", &StatusField{Name: "Escalated"}, types.StatusOpen},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ji := &Issue{Fields: IssueFields{Status: tt.status}}
+			if got := mapper.issueStatusToBeads(ji); got != tt.want {
+				t.Errorf("issueStatusToBeads() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIssueToBeadsParsesStatusCategory(t *testing.T) {
+	var ji Issue
+	raw := `{"key":"PROJ-1","fields":{"summary":"s","status":{"id":"6","name":"Cancelled","statusCategory":{"id":3,"key":"done","name":"Done"}}}}`
+	if err := json.Unmarshal([]byte(raw), &ji); err != nil {
+		t.Fatal(err)
+	}
+	conv := (&jiraFieldMapper{}).IssueToBeads(&tracker.TrackerIssue{Raw: &ji})
+	if conv == nil || conv.Issue.Status != types.StatusClosed {
+		t.Fatalf("IssueToBeads status = %v, want closed", conv)
+	}
+}
+
+func TestUpdatedSinceJQL(t *testing.T) {
+	now := time.Date(2026, 9, 30, 20, 30, 0, 0, time.UTC)
+	tests := []struct {
+		since time.Time
+		want  string
+	}{
+		{now.Add(-10 * time.Minute), `updated >= "-11m"`},
+		{now.Add(-10*time.Minute - 30*time.Second), `updated >= "-12m"`},
+		{now.Add(-48 * time.Hour), `updated >= "-2881m"`},
+		{now, `updated >= "-1m"`},
+		{now.Add(time.Minute), `updated >= "-1m"`}, // clock skew: never zero or positive
+	}
+	for _, tt := range tests {
+		if got := updatedSinceJQL(tt.since, now); got != tt.want {
+			t.Errorf("updatedSinceJQL(%s) = %s, want %s", now.Sub(tt.since), got, tt.want)
+		}
+	}
+}
+
 // configStore is a minimal storage.Storage stub for testing Init() config loading.
 // Only GetConfig and GetAllConfig are implemented; all other methods are no-ops.
 type configStore struct {

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -214,7 +216,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	// Incremental sync
 	if opts.Since != nil {
-		jql += fmt.Sprintf(` AND updated >= "%s"`, opts.Since.UTC().Format("2006-01-02 15:04 UTC"))
+		jql += " AND " + updatedSinceJQL(*opts.Since, time.Now())
 	}
 
 	jql += " ORDER BY updated DESC"
@@ -231,6 +233,19 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 		result = append(result, jiraToTrackerIssue(&issues[i], t.priorityMap))
 	}
 	return result, nil
+}
+
+// updatedSinceJQL builds an incremental-sync clause as a relative period
+// ("-Nm"). Absolute JQL dates are interpreted in the Jira user's profile
+// timezone and accept no zone suffix (Jira Server rejects "... UTC"), while a
+// relative period is evaluated against the server clock. The window is rounded
+// up with a minute of slack so boundary updates are not missed.
+func updatedSinceJQL(since, now time.Time) string {
+	minutes := int(math.Ceil(now.Sub(since).Minutes())) + 1
+	if minutes < 1 {
+		minutes = 1
+	}
+	return fmt.Sprintf(`updated >= "-%dm"`, minutes)
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
