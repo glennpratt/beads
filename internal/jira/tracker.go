@@ -219,10 +219,12 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	jql += " ORDER BY updated DESC"
 
+	debug.Logf("jira: search JQL: %s\n", jql)
 	issues, err := t.client.SearchIssues(ctx, jql)
 	if err != nil {
 		return nil, err
 	}
+	debug.Logf("jira: search returned %d issues\n", len(issues))
 
 	result := make([]tracker.TrackerIssue, 0, len(issues))
 	for i := range issues {
