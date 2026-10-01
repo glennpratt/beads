@@ -667,6 +667,14 @@ func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.Tracke
 	if ji.Fields.IssueType != nil {
 		ti.Metadata["jira_type"] = ji.Fields.IssueType.Name
 	}
+	// Jira's own status and priority names, which beads maps lossily (e.g.
+	// "Escalated" -> in_progress, "Undetermined" -> P2).
+	if ji.Fields.Status != nil {
+		ti.Metadata["jira_status"] = ji.Fields.Status.Name
+	}
+	if ji.Fields.Priority != nil {
+		ti.Metadata["jira_priority"] = ji.Fields.Priority.Name
+	}
 
 	return ti
 }
