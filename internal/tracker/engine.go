@@ -791,13 +791,29 @@ func trackerMetadataCurrent(local json.RawMessage, tracker map[string]interface{
 		return false
 	}
 	for k, v := range tracker {
-		want, err1 := json.Marshal(v)
-		got, err2 := json.Marshal(localMap[k])
-		if err1 != nil || err2 != nil || string(want) != string(got) {
+		want, err1 := canonicalJSON(v)
+		got, err2 := canonicalJSON(localMap[k])
+		if err1 != nil || err2 != nil || want != got {
 			return false
 		}
 	}
 	return true
+}
+
+// canonicalJSON marshals v after a round trip through a generic decode, so
+// structs and the maps they were stored as compare equal regardless of key
+// order.
+func canonicalJSON(v interface{}) (string, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	var generic interface{}
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return "", err
+	}
+	out, err := json.Marshal(generic)
+	return string(out), err
 }
 
 func marshalTrackerMetadata(metadata interface{}) (json.RawMessage, bool) {
@@ -1007,6 +1023,17 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		}
 	}
 
+	// One query for every issue's external_ref as of lastSync, when the
+	// store supports it, instead of a history query per local issue.
+	var refsAtSync map[string]string
+	if q, ok := externalRefsAsOfQuerier(e.Store); ok {
+		refs, err := q.ExternalRefsAsOf(ctx, *lastSync)
+		if err != nil {
+			return nil, hydratedLocalIDs, fmt.Errorf("reading external refs as of last sync: %w", err)
+		}
+		refsAtSync = refs
+	}
+
 	var hydrated []TrackerIssue
 	// unverified collects the issues whose links this pull could not check
 	// against history, for one warning after the loop. Each issue is still
@@ -1021,7 +1048,14 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, historyUnknown, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		var changedAfterLastSync, historyUnknown bool
+		var err error
+		if refsAtSync != nil {
+			previousRef, found := refsAtSync[local.ID]
+			changedAfterLastSync, historyUnknown = prelinkDecision(local, ref, previousRef, found, *lastSync)
+		} else {
+			changedAfterLastSync, historyUnknown, err = e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		}
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
 		}
@@ -1199,6 +1233,25 @@ func prelinkDecision(local *types.Issue, currentRef, previousRef string, found b
 		return false, false
 	}
 	return false, true
+}
+
+// externalRefsAsOfQuerier finds the batch history capability, unwrapping
+// storage decorators like externalRefHistoryQuerier does.
+func externalRefsAsOfQuerier(store Store) (storage.ExternalRefsAsOfQuerier, bool) {
+	if q, ok := store.(storage.ExternalRefsAsOfQuerier); ok {
+		return q, true
+	}
+	if direct, ok := store.(*directStore); ok {
+		if q, ok := direct.Storage.(storage.ExternalRefsAsOfQuerier); ok {
+			return q, true
+		}
+		if dolt, ok := direct.Storage.(storage.DoltStorage); ok {
+			if q, ok := storage.UnwrapStore(dolt).(storage.ExternalRefsAsOfQuerier); ok {
+				return q, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,
@@ -2039,8 +2092,8 @@ func (e *Engine) applyDependencyRemovals(ctx context.Context, deps []DependencyI
 	}
 	errCount := 0
 	for _, dep := range deps {
-		fromIssue, err1 := resolveIssue(ctx, dep.FromExternalID)
-		toIssue, err2 := resolveIssue(ctx, dep.ToExternalID)
+		fromIssue, err1 := resolveIssue(ctx, dep.FromExternalID, dep.FromIdentityKey)
+		toIssue, err2 := resolveIssue(ctx, dep.ToExternalID, dep.ToIdentityKey)
 		if err1 != nil || err2 != nil || fromIssue == nil || toIssue == nil {
 			continue
 		}
