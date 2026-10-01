@@ -174,3 +174,68 @@ func TestMergePulledFields(t *testing.T) {
 		}
 	})
 }
+
+func TestMergePulledLabelsKeepsTrackerMetadata(t *testing.T) {
+	tr := &Tracker{}
+	conv := &tracker.IssueConversion{Issue: &types.Issue{}}
+	ext := &tracker.TrackerIssue{Metadata: map[string]interface{}{"jira_type": "Story"}}
+	existing := &types.Issue{ID: "gp-1", Metadata: json.RawMessage(`{"jira_type":"Task","note":"mine"}`)}
+	tr.MergePulledLabels(ext, conv, existing)
+	if ext.Metadata["jira_type"] != "Story" || ext.Metadata["note"] != "mine" {
+		t.Errorf("metadata = %v, want jira_type updated to Story and note kept", ext.Metadata)
+	}
+
+	ext = &tracker.TrackerIssue{Metadata: map[string]interface{}{"jira_type": "Epic"}}
+	tr.MergePulledLabels(ext, &tracker.IssueConversion{Issue: &types.Issue{}}, nil)
+	if ext.Metadata["jira_type"] != "Epic" {
+		t.Errorf("new issue metadata = %v, want jira_type kept", ext.Metadata)
+	}
+}
+
+func TestReconcileParents(t *testing.T) {
+	tr := &Tracker{}
+	parentDep := func(to string) tracker.DependencyInfo {
+		return tracker.DependencyInfo{FromExternalID: "P-10", ToExternalID: to, Type: string(types.DepParentChild), Source: tracker.DependencySourceParent}
+	}
+	pull := func(existingMeta string, parents ...string) (*tracker.IssueConversion, map[string]interface{}) {
+		conv := &tracker.IssueConversion{Issue: &types.Issue{}}
+		for _, p := range parents {
+			conv.Dependencies = append(conv.Dependencies, parentDep(p))
+		}
+		ext := &tracker.TrackerIssue{Identifier: "P-10", Metadata: map[string]interface{}{}}
+		var existing *types.Issue
+		if existingMeta != "" {
+			existing = &types.Issue{ID: "gp-1", Metadata: json.RawMessage(existingMeta)}
+		}
+		tr.MergePulled(ext, conv, existing)
+		return conv, ext.Metadata
+	}
+
+	conv, meta := pull("", "P-1")
+	if len(conv.RemoveDependencies) != 0 || !reflect.DeepEqual(meta["jira_parents"], []string{"P-1"}) {
+		t.Errorf("first pull: removals %v, record %v", conv.RemoveDependencies, meta["jira_parents"])
+	}
+
+	conv, meta = pull(`{"jira_parents":["P-1"]}`, "P-2")
+	if want := []tracker.DependencyInfo{parentDep("P-1")}; !reflect.DeepEqual(conv.RemoveDependencies, want) {
+		t.Errorf("moved epic: removals %v, want %v", conv.RemoveDependencies, want)
+	}
+	if !reflect.DeepEqual(meta["jira_parents"], []string{"P-2"}) {
+		t.Errorf("moved epic: record %v", meta["jira_parents"])
+	}
+
+	conv, _ = pull(`{"jira_parents":["P-1"]}`, "P-1")
+	if len(conv.RemoveDependencies) != 0 {
+		t.Errorf("unchanged parent: removals %v", conv.RemoveDependencies)
+	}
+
+	conv, _ = pull(`{"note":"no record"}`, "P-2")
+	if len(conv.RemoveDependencies) != 0 {
+		t.Errorf("no record: removals %v", conv.RemoveDependencies)
+	}
+
+	conv, meta = pull(`{"jira_parents":["P-1"]}`)
+	if len(conv.RemoveDependencies) != 1 || !reflect.DeepEqual(meta["jira_parents"], []string{}) {
+		t.Errorf("parent cleared in Jira: removals %v, record %v", conv.RemoveDependencies, meta["jira_parents"])
+	}
+}

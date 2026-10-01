@@ -49,6 +49,12 @@ type Tracker struct {
 	// localLabels (jira.local_labels) are glob patterns for labels that never
 	// sync: not sent on create, and kept locally across pulls.
 	localLabels []string
+
+	// Sub-task issue type names for the primary project, resolved lazily
+	// (jira.subtask_type, else discovery, else "Sub-task"); the first is
+	// used when creating sub-tasks.
+	subtaskTypes    []string
+	subtaskResolved bool
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these

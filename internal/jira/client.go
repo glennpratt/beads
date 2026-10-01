@@ -348,6 +348,32 @@ type HierarchyFields struct {
 	ParentLink string
 }
 
+// ProjectIssueType is an issue type available for creating issues in a project.
+type ProjectIssueType struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Subtask bool   `json:"subtask"`
+}
+
+// GetProjectIssueTypes lists the issue types a project can create
+// (GET issue/createmeta/{project}/issuetypes; Server/DC returns "values",
+// Cloud "issueTypes").
+func (c *Client) GetProjectIssueTypes(ctx context.Context, projectKey string) ([]ProjectIssueType, error) {
+	apiURL := fmt.Sprintf("%s/issue/createmeta/%s/issuetypes?maxResults=200", c.apiBase(), url.PathEscape(projectKey))
+	body, err := c.doRequest(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list issue types for %s: %w", projectKey, err)
+	}
+	var result struct {
+		Values     []ProjectIssueType `json:"values"`
+		IssueTypes []ProjectIssueType `json:"issueTypes"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse issue types response: %w", err)
+	}
+	return append(result.Values, result.IssueTypes...), nil
+}
+
 // GetFields lists all Jira fields (system and custom).
 func (c *Client) GetFields(ctx context.Context) ([]Field, error) {
 	body, err := c.doRequest(ctx, "GET", c.apiBase()+"/field", nil)

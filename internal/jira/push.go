@@ -2,6 +2,7 @@ package jira
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -97,27 +98,133 @@ func (t *Tracker) applyCreateHierarchy(ctx context.Context, issue *types.Issue, 
 	}
 	p := parents[0]
 
+	// Jira Cloud has no Epic Link / Parent Link fields: parent covers every level.
+	cloud := t.epicLinkField == "" && t.parentLinkField == ""
+	parentIsEpic := p.issueType == types.TypeEpic || strings.EqualFold(p.jiraType, "Epic")
+
 	switch {
+	case isEpic && !t.epicParentAllowed(ctx, p):
+		warnings = append(warnings, fmt.Sprintf("an Epic cannot be placed under %s (a %s); created without a parent", p.key, firstNonEmpty(p.jiraType, string(p.issueType))))
 	case isEpic && t.parentLinkField != "":
 		fields[t.parentLinkField] = p.key
-	case !isEpic && p.issueType == types.TypeEpic && t.epicLinkField != "":
+	case parentIsEpic && t.epicLinkField != "":
 		fields[t.epicLinkField] = p.key
-	case isEpic || p.issueType == types.TypeEpic:
-		// Jira Cloud: the standard parent field covers every level.
-		if t.epicLinkField == "" && t.parentLinkField == "" {
-			fields["parent"] = map[string]string{"key": p.key}
-		} else {
-			warnings = append(warnings, fmt.Sprintf("no Jira field to link %s under %s; created without a parent", jiraType, p.key))
-		}
+	case (isEpic || parentIsEpic) && cloud:
+		fields["parent"] = map[string]string{"key": p.key}
+	case isEpic || parentIsEpic:
+		warnings = append(warnings, fmt.Sprintf("no Jira field to link %s under %s; created without a parent", jiraType, p.key))
+	case t.isSubtaskType(ctx, p.jiraType):
+		warnings = append(warnings, fmt.Sprintf("parent %s is a Jira %s, which cannot have sub-tasks; created without a parent", p.key, p.jiraType))
 	default:
-		warnings = append(warnings, fmt.Sprintf("parent %s is a %s, not an epic; created without a parent link (Jira sub-tasks are not created automatically)", p.key, p.issueType))
+		// Under a story/task: create as the project's sub-task type.
+		fields["issuetype"] = map[string]string{"name": t.subtaskType(ctx)}
+		fields["parent"] = map[string]string{"key": p.key}
 	}
 	return warnings
+}
+
+// epicParentAllowed reports whether an Epic may sit under p: only a level
+// above epics (e.g. Capability/Initiative via Parent Link). Uses the parent's
+// Jira type when known, else its beads type.
+func (t *Tracker) epicParentAllowed(ctx context.Context, p jiraParent) bool {
+	if p.jiraType != "" {
+		for _, low := range []string{"Epic", "Story", "Task", "Bug"} {
+			if strings.EqualFold(p.jiraType, low) {
+				return false
+			}
+		}
+		return !t.isSubtaskType(ctx, p.jiraType)
+	}
+	switch p.issueType {
+	case types.TypeEpic, types.TypeStory, types.TypeTask, types.TypeBug, types.TypeFeature, types.TypeChore:
+		return false
+	}
+	return true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// resolveSubtaskTypes loads the sub-task issue type names once.
+func (t *Tracker) resolveSubtaskTypes(ctx context.Context) {
+	if t.subtaskResolved {
+		return
+	}
+	t.subtaskResolved = true
+	if t.store != nil {
+		if configured, _ := t.getConfig(ctx, "jira.subtask_type", "JIRA_SUBTASK_TYPE"); strings.TrimSpace(configured) != "" {
+			t.subtaskTypes = []string{strings.TrimSpace(configured)}
+			return
+		}
+	}
+	if t.client != nil && t.PrimaryProjectKey() != "" {
+		its, err := t.client.GetProjectIssueTypes(ctx, t.PrimaryProjectKey())
+		if err != nil {
+			debug.Logf("jira: sub-task type discovery failed: %v\n", err)
+		}
+		for _, it := range its {
+			if it.Subtask {
+				t.subtaskTypes = append(t.subtaskTypes, it.Name)
+			}
+		}
+	}
+	if len(t.subtaskTypes) == 0 {
+		t.subtaskTypes = []string{"Sub-task"}
+	}
+	debug.Logf("jira: sub-task types: %v\n", t.subtaskTypes)
+}
+
+// subtaskType returns the issue type name used to create sub-tasks: the
+// standard "Sub-task"/"Subtask" when the project has several sub-task types
+// (e.g. "Approval", "Sub-Risk"), else the only or first one.
+func (t *Tracker) subtaskType(ctx context.Context) string {
+	t.resolveSubtaskTypes(ctx)
+	for _, name := range t.subtaskTypes {
+		n := strings.ToLower(strings.ReplaceAll(name, "-", ""))
+		if n == "subtask" {
+			return name
+		}
+	}
+	return t.subtaskTypes[0]
+}
+
+// isSubtaskType reports whether a Jira issue type name is a sub-task type.
+func (t *Tracker) isSubtaskType(ctx context.Context, name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	t.resolveSubtaskTypes(ctx)
+	for _, s := range t.subtaskTypes {
+		if strings.EqualFold(s, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// metadataString reads a string key from a bead's JSON metadata.
+func metadataString(raw json.RawMessage, key string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
 }
 
 type jiraParent struct {
 	key       string
 	issueType types.IssueType
+	jiraType  string // Jira issue type name from metadata, when pulled
 }
 
 // jiraParents returns the issue's parent-child parents that are linked to
@@ -140,7 +247,7 @@ func (t *Tracker) jiraParents(ctx context.Context, issueID string) []jiraParent 
 			continue
 		}
 		if key := ExtractJiraKey(*d.ExternalRef); key != "" {
-			parents = append(parents, jiraParent{key: key, issueType: d.IssueType})
+			parents = append(parents, jiraParent{key: key, issueType: d.IssueType, jiraType: metadataString(d.Metadata, "jira_type")})
 		}
 	}
 	sort.SliceStable(parents, func(i, j int) bool {

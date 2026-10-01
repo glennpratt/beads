@@ -443,6 +443,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo
+	var pendingRemovals []DependencyInfo
 	var dryRunIssues []*types.Issue
 
 	for _, extIssue := range extIssues {
@@ -510,6 +511,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
+		pendingRemovals = appendFilteredDependencies(pendingRemovals, conv.RemoveDependencies, opts.DependencyTypes, opts.DependencySources)
 		if opts.DryRun {
 			dryRunIssue := *conv.Issue
 			if strings.TrimSpace(ref) != "" {
@@ -580,8 +582,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	depErrors := 0
 	if opts.DryRun {
 		depErrors = e.previewDependencies(ctx, pendingDeps, dryRunIssues)
+		e.applyDependencyRemovals(ctx, pendingRemovals, true)
 	} else {
 		depErrors = e.createDependencies(ctx, pendingDeps)
+		depErrors += e.applyDependencyRemovals(ctx, pendingRemovals, false)
 	}
 	stats.Skipped += depErrors
 
@@ -1527,6 +1531,48 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 			e.warn("Failed to create dependency %s -> %s: %v", fromIssue.ID, toIssue.ID, err)
 			errCount++
 		}
+	}
+	return errCount
+}
+
+// applyDependencyRemovals removes (or, in dry run, previews removing)
+// tracker-owned dependencies the tracker reports as gone. Endpoints that are
+// not present locally, and edges that do not exist, are skipped. It returns
+// the number of errors.
+func (e *Engine) applyDependencyRemovals(ctx context.Context, deps []DependencyInfo, dryRun bool) int {
+	if len(deps) == 0 {
+		return 0
+	}
+	remover, ok := e.Store.(DependencyRemover)
+	if !ok {
+		e.warn("tracker store cannot remove dependencies; %d stale %s relationship(s) kept", len(deps), e.Tracker.DisplayName())
+		return 0
+	}
+	resolveIssue, err := e.dependencyIssueResolver(ctx, nil)
+	if err != nil {
+		e.warn("Failed to build dependency resolver: %v", err)
+		return len(deps)
+	}
+	errCount := 0
+	for _, dep := range deps {
+		fromIssue, err1 := resolveIssue(ctx, dep.FromExternalID)
+		toIssue, err2 := resolveIssue(ctx, dep.ToExternalID)
+		if err1 != nil || err2 != nil || fromIssue == nil || toIssue == nil {
+			continue
+		}
+		if !dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
+			continue
+		}
+		if dryRun {
+			e.msg("[dry-run] Would remove dependency: %s -> %s (%s)", fromIssue.ID, toIssue.ID, dep.Type)
+			continue
+		}
+		if err := remover.RemoveDependency(ctx, fromIssue.ID, toIssue.ID, e.Actor); err != nil {
+			e.warn("Failed to remove dependency %s -> %s: %v", fromIssue.ID, toIssue.ID, err)
+			errCount++
+			continue
+		}
+		e.msg("Removed %s dependency %s -> %s (no longer in %s)", dep.Type, fromIssue.ID, toIssue.ID, e.Tracker.DisplayName())
 	}
 	return errCount
 }
