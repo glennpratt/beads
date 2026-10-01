@@ -68,6 +68,10 @@ type FetchOptions struct {
 
 	// Maximum number of issues to fetch (0 = no limit).
 	Limit int
+
+	// Refresh bypasses metadata a tracker caches between syncs (set for
+	// full syncs).
+	Refresh bool
 }
 
 // SyncOptions configures the behavior of a sync operation.

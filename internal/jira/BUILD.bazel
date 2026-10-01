@@ -9,6 +9,7 @@ go_library(
         "fieldmapper.go",
         "labels.go",
         "links.go",
+        "metacache.go",
         "push.go",
         "relations.go",
         "refs.go",

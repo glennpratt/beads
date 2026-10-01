@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/debug"
@@ -222,46 +223,78 @@ func (t *Tracker) linkedKeysToFollow(ctx context.Context, fetched []Issue, fetch
 // exist" errors.
 var missingKeyRE = regexp.MustCompile(`key '([A-Za-z][A-Za-z0-9_]*-\d+)' does not exist`)
 
-// searchKeysWhere fetches issues by key in chunks, adding an optional JQL
-// condition. Keys Jira reports as nonexistent (deleted, or no permission)
-// are dropped and the chunk retried, so one stale bead cannot break a pull.
+// keyChunkSize and keyChunkConcurrency bound key-list searches: chunks fit
+// comfortably in a request URL, and a few run at once.
+const (
+	keyChunkSize        = 200
+	keyChunkConcurrency = 4
+)
+
+// searchKeysWhere fetches issues by key in chunks (several at once), adding
+// an optional JQL condition. Keys Jira reports as nonexistent (deleted, or
+// no permission) are dropped and the chunk retried, so one stale bead cannot
+// break a pull.
 func (t *Tracker) searchKeysWhere(ctx context.Context, keys []string, cond string) ([]Issue, error) {
-	var out []Issue
-	for start := 0; start < len(keys); start += 100 {
-		end := start + 100
+	var chunks [][]string
+	for start := 0; start < len(keys); start += keyChunkSize {
+		end := start + keyChunkSize
 		if end > len(keys) {
 			end = len(keys)
 		}
-		chunk := append([]string(nil), keys[start:end]...)
-		for attempt := 0; attempt < 3 && len(chunk) > 0; attempt++ {
-			jql := "key in (" + strings.Join(chunk, ", ") + ")"
-			if cond != "" {
-				jql += " AND " + cond
-			}
-			issues, err := t.client.SearchIssues(ctx, jql)
-			if err == nil {
-				out = append(out, issues...)
-				break
-			}
-			missing := missingKeyRE.FindAllStringSubmatch(err.Error(), -1)
-			if len(missing) == 0 || attempt == 2 {
-				return out, err
-			}
-			drop := make(map[string]bool, len(missing))
-			for _, m := range missing {
-				drop[strings.ToUpper(m[1])] = true
-			}
-			debug.Logf("jira: skipping %d keys Jira reports missing: %v\n", len(drop), drop)
-			kept := chunk[:0]
-			for _, k := range chunk {
-				if !drop[strings.ToUpper(k)] {
-					kept = append(kept, k)
-				}
-			}
-			chunk = kept
+		chunks = append(chunks, append([]string(nil), keys[start:end]...))
+	}
+	results := make([][]Issue, len(chunks))
+	errs := make([]error, len(chunks))
+	sem := make(chan struct{}, keyChunkConcurrency)
+	var wg sync.WaitGroup
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(i int, chunk []string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[i], errs[i] = t.searchKeyChunk(ctx, chunk, cond)
+		}(i, chunk)
+	}
+	wg.Wait()
+	var out []Issue
+	for i := range chunks {
+		if errs[i] != nil {
+			return out, errs[i]
 		}
+		out = append(out, results[i]...)
 	}
 	return out, nil
+}
+
+func (t *Tracker) searchKeyChunk(ctx context.Context, chunk []string, cond string) ([]Issue, error) {
+	for attempt := 0; attempt < 3 && len(chunk) > 0; attempt++ {
+		jql := "key in (" + strings.Join(chunk, ", ") + ")"
+		if cond != "" {
+			jql += " AND " + cond
+		}
+		issues, err := t.client.SearchIssues(ctx, jql)
+		if err == nil {
+			return issues, nil
+		}
+		missing := missingKeyRE.FindAllStringSubmatch(err.Error(), -1)
+		if len(missing) == 0 || attempt == 2 {
+			return nil, err
+		}
+		drop := make(map[string]bool, len(missing))
+		for _, m := range missing {
+			drop[strings.ToUpper(m[1])] = true
+		}
+		debug.Logf("jira: skipping %d keys Jira reports missing: %v\n", len(drop), drop)
+		kept := chunk[:0]
+		for _, k := range chunk {
+			if !drop[strings.ToUpper(k)] {
+				kept = append(kept, k)
+			}
+		}
+		chunk = kept
+	}
+	return nil, nil
 }
 
 // refreshTrackedKeys returns local Jira-linked issues outside this pull's
