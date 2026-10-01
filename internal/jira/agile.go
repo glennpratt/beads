@@ -71,6 +71,22 @@ func (c *Client) CreateIssueLink(ctx context.Context, typeName, inwardKey, outwa
 	return nil
 }
 
+// AddComment adds a comment to an issue (plain text on v2, ADF on v3).
+func (c *Client) AddComment(ctx context.Context, key, text string) error {
+	var body interface{} = text
+	if c.APIVersion != "2" {
+		body = PlainTextToADF(text)
+	}
+	payload, err := json.Marshal(map[string]interface{}{"body": body})
+	if err != nil {
+		return err
+	}
+	if _, err := c.doRequest(ctx, "POST", fmt.Sprintf("%s/issue/%s/comment", c.apiBase(), url.PathEscape(key)), payload); err != nil {
+		return fmt.Errorf("comment on %s: %w", key, err)
+	}
+	return nil
+}
+
 // DeleteIssueLink removes an issue link by ID.
 func (c *Client) DeleteIssueLink(ctx context.Context, linkID string) error {
 	if _, err := c.doRequest(ctx, "DELETE", c.apiBase()+"/issueLink/"+url.PathEscape(linkID), nil); err != nil {

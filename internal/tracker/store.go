@@ -32,6 +32,14 @@ type ConnectionHolder interface {
 	HoldConnection(ctx context.Context) (func() error, error)
 }
 
+// CommentReader is the optional capability to read an issue's comments,
+// used by trackers that push local comments.
+type CommentReader interface {
+	GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error)
+}
+
+var _ CommentReader = (*directStore)(nil)
+
 // DependencyRemover is the optional capability to remove a dependency, used
 // when a tracker reports that a relationship it owns no longer exists.
 type DependencyRemover interface {

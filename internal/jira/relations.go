@@ -40,6 +40,9 @@ type linkOp struct {
 }
 
 type relationChanges struct {
+	comments     []*types.Comment // local comments not yet pushed
+	closeComment string           // close reason to post with a close transition
+
 	parentChanged bool
 	newParent     string // "" clears
 	parentField   string // custom field ID, or "parent" (Cloud)
@@ -49,7 +52,7 @@ type relationChanges struct {
 }
 
 func (rc *relationChanges) empty() bool {
-	return rc == nil || (!rc.parentChanged && len(rc.addLinks) == 0 && len(rc.removeLinks) == 0)
+	return rc == nil || (!rc.parentChanged && len(rc.addLinks) == 0 && len(rc.removeLinks) == 0 && len(rc.comments) == 0)
 }
 
 // describe lists the changes for previews, e.g. "epic link KPP-9, +blocks KPP-2<-KPP-1".
@@ -74,6 +77,12 @@ func (rc *relationChanges) describe() []string {
 	}
 	for _, op := range rc.removeLinks {
 		out = append(out, "-"+describeLink(op.dep))
+	}
+	for _, c := range rc.comments {
+		out = append(out, "+comment: "+snippet(c.Text))
+	}
+	if rc.closeComment != "" {
+		out = append(out, "close comment: "+snippet(rc.closeComment))
 	}
 	return append(out, rc.warnings...)
 }
@@ -126,6 +135,7 @@ func (t *Tracker) relationDiff(ctx context.Context, local *types.Issue) *relatio
 	if this == "" || t.store == nil {
 		return rc
 	}
+	rc.comments = t.pendingComments(ctx, local)
 	recParents, haveParents := stringListMeta(local.Metadata, jiraParentsMetadataKey)
 	for i, p := range recParents {
 		recParents[i] = strings.ToUpper(p)
@@ -398,10 +408,66 @@ func (t *Tracker) pushLinkType(ctx context.Context, typ types.DependencyType) st
 	return pushLinkTypes[typ]
 }
 
+// jiraCommentsMetadataKey lists the IDs of local comments already pushed.
+const jiraCommentsMetadataKey = "jira_pushed_comments"
+
+// pendingComments returns the bead's comments not yet pushed to Jira.
+// Comments are shared (pushed); notes (bd note) stay local.
+// jira.push_comments=false disables this.
+func (t *Tracker) pendingComments(ctx context.Context, local *types.Issue) []*types.Comment {
+	if v, _ := t.getConfig(ctx, "jira.push_comments", "JIRA_PUSH_COMMENTS"); strings.EqualFold(strings.TrimSpace(v), "false") {
+		return nil
+	}
+	reader, ok := t.store.(tracker.CommentReader)
+	if !ok {
+		return nil
+	}
+	comments, err := reader.GetIssueComments(ctx, local.ID)
+	if err != nil {
+		debug.Logf("jira: reading comments of %s: %v\n", local.ID, err)
+		return nil
+	}
+	pushed, _ := stringListMeta(local.Metadata, jiraCommentsMetadataKey)
+	done := map[string]bool{}
+	for _, id := range pushed {
+		done[id] = true
+	}
+	var out []*types.Comment
+	for _, c := range comments {
+		if c != nil && !done[c.ID] && strings.TrimSpace(c.Text) != "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func snippet(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 40 {
+		return s[:40] + "..."
+	}
+	return s
+}
+
+// applyComments posts pending comments to externalID.
+func (t *Tracker) applyComments(ctx context.Context, externalID string, rc *relationChanges) error {
+	for _, c := range rc.comments {
+		if err := t.client.AddComment(ctx, externalID, c.Text); err != nil {
+			return err
+		}
+	}
+	if rc.closeComment != "" {
+		if err := t.client.AddComment(ctx, externalID, rc.closeComment); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // recordPushedRelations updates the bead's pull records after a push so a
 // repeated push sends nothing until the next pull refreshes them.
 func (t *Tracker) recordPushedRelations(ctx context.Context, local *types.Issue, rc *relationChanges) {
-	if rc.empty() || t.store == nil {
+	if (rc.empty() && rc.closeComment == "") || t.store == nil {
 		return
 	}
 	meta := map[string]interface{}{}
@@ -431,7 +497,19 @@ func (t *Tracker) recordPushedRelations(ctx context.Context, local *types.Issue,
 		record = append(record, s)
 	}
 	sort.Strings(record)
-	meta[jiraLinksMetadataKey] = record
+	if _, had := stringListMeta(local.Metadata, jiraLinksMetadataKey); had || len(rc.addLinks)+len(rc.removeLinks) > 0 {
+		meta[jiraLinksMetadataKey] = record
+	}
+	if rc.closeComment != "" {
+		meta[jiraCloseCommentMetadataKey] = fieldHash(normalizeText(rc.closeComment))
+	}
+	if len(rc.comments) > 0 {
+		ids, _ := stringListMeta(local.Metadata, jiraCommentsMetadataKey)
+		for _, c := range rc.comments {
+			ids = append(ids, c.ID)
+		}
+		meta[jiraCommentsMetadataKey] = ids
+	}
 	raw, err := json.Marshal(meta)
 	if err != nil {
 		return
