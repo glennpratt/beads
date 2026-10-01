@@ -56,6 +56,15 @@ type Tracker struct {
 	// used when creating sub-tasks.
 	subtaskTypes    []string
 	subtaskResolved bool
+
+	// Pull scopes and boards (see boards.go).
+	scopes         []namedScope
+	boards         []*boardSpec
+	boardsResolved bool
+	boardsErr      error
+	boardMembers   map[string]map[string]boardEntry // issue key -> board name -> entry
+	membersLoaded  bool
+	membersErr     error
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -167,6 +176,8 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 			t.priorityMap = priorityMap
 		}
 
+		t.loadScopeConfig(allConfig)
+
 		const customFieldPrefix = "jira.custom_fields."
 		customFields := make(map[string]interface{})
 		typeCustomFields := make(map[string]map[string]interface{})
@@ -265,21 +276,10 @@ func (t *Tracker) resolveHierarchyFields(ctx context.Context) {
 func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
 	t.resolveHierarchyFields(ctx)
 
-	// Build JQL query — use IN clause for multi-project.
-	var jql string
-	if len(t.projectKeys) == 1 {
-		jql = fmt.Sprintf("project = %q", t.projectKeys[0])
-	} else {
-		quoted := make([]string, len(t.projectKeys))
-		for i, k := range t.projectKeys {
-			quoted[i] = fmt.Sprintf("%q", k)
-		}
-		jql = fmt.Sprintf("project IN (%s)", strings.Join(quoted, ", "))
-	}
-
-	// User-configured pull_jql filter (e.g. 'labels = "agent-ready"')
-	if pullJQL, _ := t.getConfig(ctx, "jira.pull_jql", "JIRA_PULL_JQL"); pullJQL != "" {
-		jql += " AND (" + pullJQL + ")" // parenthesize: user JQL may contain OR
+	// Scope: project + jira.pull_jql, OR-ed with jira.scope.* and board filters.
+	jql, err := t.scopeJQL(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	// State filter
@@ -303,6 +303,26 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 		return nil, err
 	}
 	debug.Logf("jira: search returned %d issues\n", len(issues))
+
+	// Board membership changes (rank, column, aging out of a board filter)
+	// need not bump an issue's updated time; fetch drifted issues too.
+	if len(t.boards) > 0 {
+		if err := t.loadBoardMembership(ctx); err != nil {
+			return nil, err
+		}
+		fetched := make(map[string]bool, len(issues))
+		for _, i := range issues {
+			fetched[strings.ToUpper(i.Key)] = true
+		}
+		if drift := t.boardDriftKeys(ctx, fetched); len(drift) > 0 {
+			debug.Logf("jira: board membership changed for %d issues; fetching them\n", len(drift))
+			extra, err := t.searchKeys(ctx, drift)
+			if err != nil {
+				return nil, err
+			}
+			issues = append(issues, extra...)
+		}
+	}
 
 	result := make([]tracker.TrackerIssue, 0, len(issues))
 	for i := range issues {
