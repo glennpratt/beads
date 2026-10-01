@@ -1,6 +1,7 @@
 package jira
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -105,7 +106,7 @@ func TestMergePulledFields(t *testing.T) {
 		cp := *remote
 		conv := &tracker.IssueConversion{Issue: &cp}
 		ext := &tracker.TrackerIssue{}
-		warnings := tr.MergePulled(ext, conv, existing)
+		warnings := tr.MergePulled(context.Background(), ext, conv, existing)
 		stored := *conv.Issue
 		raw, _ := json.Marshal(ext.Metadata)
 		stored.Metadata = raw
@@ -207,7 +208,7 @@ func TestReconcileParents(t *testing.T) {
 		if existingMeta != "" {
 			existing = &types.Issue{ID: "gp-1", Metadata: json.RawMessage(existingMeta)}
 		}
-		tr.MergePulled(ext, conv, existing)
+		tr.MergePulled(context.Background(), ext, conv, existing)
 		return conv, ext.Metadata
 	}
 
@@ -249,7 +250,7 @@ func TestMergePulledKeepsPendingAssignee(t *testing.T) {
 		cp := *r
 		conv := &tracker.IssueConversion{Issue: &cp}
 		ext := &tracker.TrackerIssue{Metadata: map[string]interface{}{}}
-		tr.MergePulled(ext, conv, existing)
+		tr.MergePulled(context.Background(), ext, conv, existing)
 		stored := *conv.Issue
 		raw, _ := json.Marshal(ext.Metadata)
 		stored.Metadata, stored.ID = raw, "gp-1"

@@ -3,6 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "jira",
     srcs = [
+        "agile.go",
+        "boards.go",
         "client.go",
         "fieldmapper.go",
         "labels.go",
@@ -24,6 +26,7 @@ go_library(
 go_test(
     name = "jira_test",
     srcs = [
+        "boards_test.go",
         "client_test.go",
         "client_tls_test.go",
         "hierarchy_test.go",

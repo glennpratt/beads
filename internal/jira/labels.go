@@ -1,6 +1,7 @@
 package jira
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,8 +37,8 @@ func parseLabelPatterns(s string) []string {
 // marker or a jira.local_labels pattern match.
 func isLocalLabel(label, pushLabel string, patterns []string) bool {
 	l := strings.ToLower(strings.TrimSpace(label))
-	if l == "" {
-		return true
+	if l == "" || strings.HasPrefix(l, boardLabelPrefix) || strings.HasPrefix(l, backlogLabelPrefix) {
+		return true // board membership labels are mirrored from Jira boards, never sent
 	}
 	if pushLabel != "" && l == strings.ToLower(pushLabel) {
 		return true
@@ -151,7 +152,8 @@ func fieldHash(v string) string {
 // a local-only change is kept (so a later push sends it), a Jira-only change
 // is taken, and when both changed differently Jira wins with a warning (the
 // local value remains in the bead's history). Without a record, Jira wins.
-func (t *Tracker) MergePulled(extIssue *tracker.TrackerIssue, conv *tracker.IssueConversion, existing *types.Issue) []string {
+func (t *Tracker) MergePulled(ctx context.Context, extIssue *tracker.TrackerIssue, conv *tracker.IssueConversion, existing *types.Issue) []string {
+	t.applyBoardMembership(ctx, extIssue, conv, existing)
 	t.MergePulledLabels(extIssue, conv, existing)
 	if conv == nil || conv.Issue == nil || extIssue == nil {
 		return nil

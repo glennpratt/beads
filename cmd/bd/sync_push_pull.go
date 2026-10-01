@@ -188,6 +188,7 @@ func init() {
 	// Jira push/pull
 	jiraPushCmd.Flags().Bool("dry-run", false, "Preview push without making changes")
 	jiraPullCmd.Flags().Bool("dry-run", false, "Preview pull without making changes")
+	jiraPullCmd.Flags().Bool("full", false, "Pull everything in scope, ignoring the last sync time")
 	jiraCmd.AddCommand(jiraPushCmd)
 	jiraCmd.AddCommand(jiraPullCmd)
 
@@ -421,6 +422,11 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PullHooks = buildJiraPullHooks(jt, engine.OnWarning)
+
+	if full, _ := cmd.Flags().GetBool("full"); full {
+		restore := forceFullJiraPull(ctx, trackerStore, dryRun)
+		defer restore()
+	}
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Pull:     true,

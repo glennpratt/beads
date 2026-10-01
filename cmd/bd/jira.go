@@ -110,6 +110,7 @@ func init() {
 	jiraSyncCmd.Flags().Bool("pull", false, "Pull issues from Jira")
 	jiraSyncCmd.Flags().Bool("push", false, "Push issues to Jira")
 	jiraSyncCmd.Flags().Bool("dry-run", false, "Preview sync without making changes")
+	jiraSyncCmd.Flags().Bool("full", false, "Pull everything in scope, ignoring the last sync time (e.g. after changing scopes)")
 	jiraSyncCmd.Flags().Bool("prefer-local", false, "Prefer local version on conflicts")
 	jiraSyncCmd.Flags().Bool("prefer-jira", false, "Prefer Jira version on conflicts")
 	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
@@ -191,6 +192,11 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		opts.ConflictResolution = tracker.ConflictExternal
 	} else {
 		opts.ConflictResolution = tracker.ConflictTimestamp
+	}
+
+	if full, _ := cmd.Flags().GetBool("full"); full && pull {
+		restore := forceFullJiraPull(ctx, trackerStore, dryRun)
+		defer restore()
 	}
 
 	result, err := engine.Sync(ctx, opts)
@@ -279,12 +285,28 @@ func buildJiraPushHooksForStore(ctx context.Context, st tracker.Store, jt *jira.
 	}
 }
 
+// forceFullJiraPull clears jira.last_sync so the next pull is not
+// incremental. For a dry run, the returned func restores the previous value
+// so previewing never changes sync state.
+func forceFullJiraPull(ctx context.Context, st tracker.Store, dryRun bool) func() {
+	prev, _ := st.GetLocalMetadata(ctx, "jira.last_sync")
+	if err := st.SetLocalMetadata(ctx, "jira.last_sync", ""); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not reset jira.last_sync: %v\n", err)
+		return func() {}
+	}
+	return func() {
+		if dryRun && prev != "" {
+			_ = st.SetLocalMetadata(ctx, "jira.last_sync", prev)
+		}
+	}
+}
+
 // buildJiraPullHooks keeps local labels and pending local field edits
 // across pulls (see jira.Tracker.MergePulled).
 func buildJiraPullHooks(jt *jira.Tracker, warn func(string)) *tracker.PullHooks {
 	return &tracker.PullHooks{
-		AfterConvert: func(_ context.Context, extIssue *tracker.TrackerIssue, conv *tracker.IssueConversion, _ string, existing *types.Issue, _ tracker.SyncOptions) error {
-			for _, w := range jt.MergePulled(extIssue, conv, existing) {
+		AfterConvert: func(ctx context.Context, extIssue *tracker.TrackerIssue, conv *tracker.IssueConversion, _ string, existing *types.Issue, _ tracker.SyncOptions) error {
+			for _, w := range jt.MergePulled(ctx, extIssue, conv, existing) {
 				if warn != nil {
 					warn(w)
 				}
