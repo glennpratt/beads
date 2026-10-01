@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -74,15 +75,28 @@ func (t *Tracker) resolveBoards(ctx context.Context) error {
 	}
 	t.boardsResolved = true
 	for _, b := range t.boards {
-		cfg, err := t.client.GetBoardConfig(ctx, b.id)
-		if err != nil {
-			t.boardsErr = fmt.Errorf("board %s (%s): %w", b.name, b.id, err)
-			return t.boardsErr
+		var cached struct {
+			Config    BoardConfig `json:"config"`
+			FilterJQL string      `json:"filter_jql"`
 		}
-		filterJQL, err := t.client.GetFilterJQL(ctx, cfg.Filter.ID)
-		if err != nil {
-			t.boardsErr = fmt.Errorf("board %s (%s): %w", b.name, b.id, err)
-			return t.boardsErr
+		var cfg *BoardConfig
+		var filterJQL string
+		if t.cacheGet(ctx, "board."+b.id, &cached) {
+			cfg, filterJQL = &cached.Config, cached.FilterJQL
+		} else {
+			var err error
+			cfg, err = t.client.GetBoardConfig(ctx, b.id)
+			if err != nil {
+				t.boardsErr = fmt.Errorf("board %s (%s): %w", b.name, b.id, err)
+				return t.boardsErr
+			}
+			filterJQL, err = t.client.GetFilterJQL(ctx, cfg.Filter.ID)
+			if err != nil {
+				t.boardsErr = fmt.Errorf("board %s (%s): %w", b.name, b.id, err)
+				return t.boardsErr
+			}
+			cached.Config, cached.FilterJQL = *cfg, filterJQL
+			t.cachePut(ctx, "board."+b.id, cached)
 		}
 		b.cfg = cfg
 		b.scopeJQL = "(" + filterJQL + ")"
@@ -146,41 +160,66 @@ func (t *Tracker) loadBoardMembership(ctx context.Context) error {
 		t.membersErr = err
 		return err
 	}
+	type boardResult struct {
+		entries map[string]boardEntry // issue key -> entry
+		err     error
+	}
+	results := make([]boardResult, len(t.boards))
+	var wg sync.WaitGroup
+	for i, b := range t.boards {
+		wg.Add(1)
+		go func(i int, b *boardSpec) {
+			defer wg.Done()
+			results[i].entries, results[i].err = t.boardEntries(ctx, b)
+		}(i, b)
+	}
+	wg.Wait()
+
 	members := make(map[string]map[string]boardEntry)
-	for _, b := range t.boards {
-		fields := []string{"status"}
-		rankField := b.cfg.RankField()
-		if rankField != "" {
-			fields = append(fields, rankField)
-		}
-		issues, err := t.client.GetBoardIssues(ctx, b.id, fields)
-		if err != nil {
-			t.membersErr = fmt.Errorf("board %s issues: %w", b.name, err)
+	for i, b := range t.boards {
+		if results[i].err != nil {
+			t.membersErr = results[i].err
 			return t.membersErr
 		}
-		backlog, backlogCols := t.boardBacklog(ctx, b)
-		for _, i := range issues {
-			key := strings.ToUpper(i.Key)
-			e := boardEntry{Rank: i.Fields.CustomFieldKey(rankField)}
-			if i.Fields.Status != nil {
-				e.Column = b.cfg.ColumnForStatus(i.Fields.Status.ID)
-			}
-			e.OnBoard = !backlog[key] && !backlogCols[e.Column]
+		onBoard := 0
+		for key, e := range results[i].entries {
 			if members[key] == nil {
 				members[key] = make(map[string]boardEntry)
 			}
 			members[key][b.name] = e
-		}
-		onBoard := 0
-		for key := range members {
-			if e, ok := members[key][b.name]; ok && e.OnBoard {
+			if e.OnBoard {
 				onBoard++
 			}
 		}
-		debug.Logf("jira: board %s: %d issues, %d on the board\n", b.name, len(issues), onBoard)
+		debug.Logf("jira: board %s: %d issues, %d on the board\n", b.name, len(results[i].entries), onBoard)
 	}
 	t.boardMembers = members
 	return nil
+}
+
+// boardEntries fetches one board's issues with their column, rank and
+// whether they are on the board (vs. its backlog).
+func (t *Tracker) boardEntries(ctx context.Context, b *boardSpec) (map[string]boardEntry, error) {
+	fields := []string{"status"}
+	rankField := b.cfg.RankField()
+	if rankField != "" {
+		fields = append(fields, rankField)
+	}
+	issues, err := t.client.GetBoardIssues(ctx, b.id, fields)
+	if err != nil {
+		return nil, fmt.Errorf("board %s issues: %w", b.name, err)
+	}
+	backlog, backlogCols := t.boardBacklog(ctx, b)
+	entries := make(map[string]boardEntry, len(issues))
+	for _, i := range issues {
+		e := boardEntry{Rank: i.Fields.CustomFieldKey(rankField)}
+		if i.Fields.Status != nil {
+			e.Column = b.cfg.ColumnForStatus(i.Fields.Status.ID)
+		}
+		e.OnBoard = !backlog[strings.ToUpper(i.Key)] && !backlogCols[e.Column]
+		entries[strings.ToUpper(i.Key)] = e
+	}
+	return entries, nil
 }
 
 // boardBacklog returns the board's backlog as issue keys (public backlog
@@ -189,6 +228,13 @@ func (t *Tracker) loadBoardMembership(ctx context.Context) error {
 // edit model is unavailable falls back to a first column named "Backlog".
 func (t *Tracker) boardBacklog(ctx context.Context, b *boardSpec) (map[string]bool, map[string]bool) {
 	keys, cols := map[string]bool{}, map[string]bool{}
+	var cachedCols []string
+	if strings.EqualFold(b.cfg.Type, "kanban") && t.cacheGet(ctx, "board."+b.id+".kanban_backlog", &cachedCols) {
+		for _, n := range cachedCols {
+			cols[n] = true
+		}
+		return keys, cols
+	}
 	bl, err := t.client.GetBoardBacklog(ctx, b.id)
 	if err == nil {
 		for _, i := range bl {
@@ -210,6 +256,10 @@ func (t *Tracker) boardBacklog(ctx context.Context, b *boardSpec) (map[string]bo
 	for _, n := range names {
 		cols[n] = true
 	}
+	if names == nil {
+		names = []string{}
+	}
+	t.cachePut(ctx, "board."+b.id+".kanban_backlog", names)
 	debug.Logf("jira: board %s backlog columns: %v\n", b.name, names)
 	return keys, cols
 }

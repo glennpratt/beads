@@ -71,6 +71,9 @@ type Tracker struct {
 
 	// linkMap overrides link type kinds (jira.link_map.<type>; see links.go).
 	linkMap map[string]string
+
+	// refreshMeta bypasses the metadata cache (full pulls; see metacache.go).
+	refreshMeta bool
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -253,9 +256,15 @@ func (t *Tracker) resolveHierarchyFields(ctx context.Context) {
 	epicName, _ := t.getConfig(ctx, "jira.epic_name_field", "JIRA_EPIC_NAME_FIELD")
 	parentLink, _ := t.getConfig(ctx, "jira.parent_link_field", "JIRA_PARENT_LINK_FIELD")
 	if epicLink == "" && epicName == "" && parentLink == "" {
-		hf, err := t.client.DiscoverHierarchyFields(ctx)
-		if err != nil {
-			debug.Logf("jira: hierarchy field discovery failed, using parent field only: %v\n", err)
+		var hf HierarchyFields
+		if !t.cacheGet(ctx, "fields", &hf) {
+			var err error
+			hf, err = t.client.DiscoverHierarchyFields(ctx)
+			if err != nil {
+				debug.Logf("jira: hierarchy field discovery failed, using parent field only: %v\n", err)
+			} else {
+				t.cachePut(ctx, "fields", hf)
+			}
 		}
 		epicLink, epicName, parentLink = hf.EpicLink, hf.EpicName, hf.ParentLink
 	}
@@ -277,6 +286,7 @@ func (t *Tracker) resolveHierarchyFields(ctx context.Context) {
 }
 
 func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
+	t.refreshMeta = opts.Refresh
 	t.resolveHierarchyFields(ctx)
 
 	// Scope: project + jira.pull_jql, OR-ed with jira.scope.* and board filters.
@@ -300,8 +310,20 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	jql += " ORDER BY updated DESC"
 
+	// Board membership is independent of the search; load it concurrently.
+	var membersDone chan error
+	if len(t.boards) > 0 {
+		membersDone = make(chan error, 1)
+		go func() { membersDone <- t.loadBoardMembership(ctx) }()
+	}
+
 	debug.Logf("jira: search JQL: %s\n", jql)
 	issues, err := t.client.SearchIssues(ctx, jql)
+	if membersDone != nil {
+		if mErr := <-membersDone; err == nil && mErr != nil {
+			err = mErr
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

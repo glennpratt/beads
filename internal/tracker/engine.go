@@ -355,7 +355,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	stats := &PullStats{}
 
 	// Determine if incremental sync is possible
-	fetchOpts := FetchOptions{State: opts.State}
+	fetchOpts := FetchOptions{State: opts.State, Refresh: opts.Full}
 	var lastSync *time.Time
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" && !opts.Full {

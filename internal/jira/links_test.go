@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/tracker"
@@ -147,5 +149,38 @@ func TestStrongestPerPair(t *testing.T) {
 	want := []tracker.DependencyInfo{d("B", "A", "blocks"), d("C", "E", "parent-child"), d("X", "Y", "duplicates")}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
+	}
+}
+
+func TestSearchKeysWhereChunksConcurrently(t *testing.T) {
+	var mu sync.Mutex
+	var queries int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jql := r.URL.Query().Get("jql")
+		mu.Lock()
+		queries++
+		mu.Unlock()
+		inner := strings.TrimSuffix(strings.TrimPrefix(jql, "key in ("), ")")
+		var issues []string
+		for _, k := range strings.Split(inner, ", ") {
+			issues = append(issues, `{"key":"`+k+`","fields":{}}`)
+		}
+		_, _ = w.Write([]byte(`{"startAt":0,"maxResults":1000,"total":` + strconv.Itoa(len(issues)) + `,"issues":[` + strings.Join(issues, ",") + `]}`))
+	}))
+	t.Cleanup(srv.Close)
+	keys := make([]string, 450)
+	for i := range keys {
+		keys[i] = "P-" + strconv.Itoa(i+1)
+	}
+	tr := &Tracker{client: newTestClient(srv.URL, "2")}
+	issues, err := tr.searchKeysWhere(context.Background(), keys, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 450 || issues[0].Key != "P-1" || issues[449].Key != "P-450" {
+		t.Errorf("got %d issues (first %v, last %v), want 450 in key order", len(issues), issues[0].Key, issues[len(issues)-1].Key)
+	}
+	if queries != 3 {
+		t.Errorf("queries = %d, want 3 chunks", queries)
 	}
 }
