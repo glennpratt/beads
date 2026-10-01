@@ -184,3 +184,66 @@ func TestSearchKeysWhereChunksConcurrently(t *testing.T) {
 		t.Errorf("queries = %d, want 3 chunks", queries)
 	}
 }
+
+// linkStore lists local beads for localJiraKeys.
+type linkStore struct {
+	*configStore
+	issues []*types.Issue
+}
+
+func (s *linkStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	return s.issues, nil
+}
+
+func TestFetchIssuesFollowsLinksOneHopOnly(t *testing.T) {
+	var mu sync.Mutex
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/field") {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		jql := r.URL.Query().Get("jql")
+		mu.Lock()
+		queries = append(queries, jql)
+		mu.Unlock()
+		issue := func(key, linkTo string) string {
+			return `{"key":"` + key + `","fields":{"issuelinks":[{"type":{"name":"Relates"},"outwardIssue":{"key":"` + linkTo + `"}}]}}`
+		}
+		var out []string
+		switch {
+		case strings.HasPrefix(jql, "key in"):
+			if strings.Contains(jql, "B-1") {
+				out = append(out, issue("B-1", "D-1")) // tracked, reached via a link
+			}
+			if strings.Contains(jql, "C-1") {
+				out = append(out, issue("C-1", "E-1")) // newly followed from scope
+			}
+		default:
+			out = append(out, issue("A-1", "C-1")) // the scope search
+		}
+		_, _ = w.Write([]byte(`{"startAt":0,"maxResults":100,"total":` + strconv.Itoa(len(out)) + `,"issues":[` + strings.Join(out, ",") + `]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	ref := func(k string) *string { s := "https://jira.example.com/browse/" + k; return &s }
+	store := &linkStore{configStore: &configStore{data: map[string]string{}}, issues: []*types.Issue{{ID: "b", ExternalRef: ref("B-1")}}}
+	tr := &Tracker{client: newTestClient(srv.URL, "2"), store: store, projectKeys: []string{"A"}, apiVersion: "2", jiraURL: "https://jira.example.com", hierarchyResolved: true}
+
+	issues, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{}) // full pull
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, i := range issues {
+		got = append(got, i.Identifier)
+	}
+	if want := []string{"A-1", "C-1", "B-1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("fetched %v, want %v (no D-1 or E-1: links of linked issues are not followed)", got, want)
+	}
+	for _, q := range queries {
+		if strings.Contains(q, "D-1") || strings.Contains(q, "E-1") {
+			t.Errorf("followed a second hop: %q", q)
+		}
+	}
+}
