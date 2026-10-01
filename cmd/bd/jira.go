@@ -27,6 +27,9 @@ Configuration:
   bd config set jira.username "your_email@company.com"  # For Jira Cloud
   bd config set jira.push_prefix "hippo"       # Only push hippo-* issues to Jira
   bd config set jira.push_prefix "proj1,proj2" # Multiple prefixes (comma-separated)
+  bd config set jira.push_label "jira"         # Create only beads labeled "jira"
+                                               # (linked beads still update; the
+                                               # label is not sent to Jira)
 
 Self-hosted Jira (Server/Data Center):
   bd config set jira.api_version "2"            # REST API v2
