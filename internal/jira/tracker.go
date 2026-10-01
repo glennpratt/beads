@@ -269,7 +269,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	// User-configured pull_jql filter (e.g. 'labels = "agent-ready"')
 	if pullJQL, _ := t.getConfig(ctx, "jira.pull_jql", "JIRA_PULL_JQL"); pullJQL != "" {
-		jql += " AND " + pullJQL
+		jql += " AND (" + pullJQL + ")" // parenthesize: user JQL may contain OR
 	}
 
 	// State filter

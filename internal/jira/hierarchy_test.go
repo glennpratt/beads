@@ -189,3 +189,30 @@ func TestResolveHierarchyFieldsConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchIssuesParenthesizesPullJQL(t *testing.T) {
+	var captured atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/field") {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		captured.Store(r.URL.Query().Get("jql"))
+		_, _ = w.Write([]byte(`{"startAt":0,"maxResults":100,"total":0,"issues":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	tr := &Tracker{
+		client:      newTestClient(srv.URL, "2"),
+		store:       &configStore{data: map[string]string{"jira.pull_jql": `id = P-1 OR issue in childIssuesOf("P-1")`}},
+		projectKeys: []string{"P"},
+		apiVersion:  "2",
+	}
+	if _, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	jql, _ := captured.Load().(string)
+	if want := `project = "P" AND (id = P-1 OR issue in childIssuesOf("P-1"))`; !strings.HasPrefix(jql, want) {
+		t.Errorf("JQL = %q, want prefix %q", jql, want)
+	}
+}
