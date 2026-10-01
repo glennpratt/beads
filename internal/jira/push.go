@@ -180,14 +180,15 @@ func (t *Tracker) DescribeCreate(ctx context.Context, issue *types.Issue) string
 	return strings.Join(parts, "; ")
 }
 
-// jiraLabels returns labels to send to Jira, without the push marker.
+// jiraLabels returns labels to send to Jira, without the push marker or
+// jira.local_labels matches.
 func (m *jiraFieldMapper) jiraLabels(labels []string) []string {
-	if m.pushLabel == "" {
+	if m.pushLabel == "" && len(m.localLabels) == 0 {
 		return labels
 	}
 	out := make([]string, 0, len(labels))
 	for _, l := range labels {
-		if !strings.EqualFold(strings.TrimSpace(l), m.pushLabel) {
+		if !isLocalLabel(l, m.pushLabel, m.localLabels) {
 			out = append(out, l)
 		}
 	}

@@ -45,6 +45,10 @@ type Tracker struct {
 	// pushLabel (jira.push_label) marks unlinked beads that may be created in
 	// Jira. It is stripped from the labels sent to Jira.
 	pushLabel string
+
+	// localLabels (jira.local_labels) are glob patterns for labels that never
+	// sync: not sent on create, and kept locally across pulls.
+	localLabels []string
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -107,6 +111,8 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 
 	pushLabel, _ := t.getConfig(ctx, "jira.push_label", "JIRA_PUSH_LABEL")
 	t.pushLabel = strings.TrimSpace(pushLabel)
+	localLabels, _ := t.getConfig(ctx, "jira.local_labels", "JIRA_LOCAL_LABELS")
+	t.localLabels = parseLabelPatterns(localLabels)
 
 	apiVersion, _ := t.getConfig(ctx, "jira.api_version", "JIRA_API_VERSION")
 	if apiVersion == "" {
@@ -426,6 +432,7 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 		epicLinkField:    t.epicLinkField,
 		parentLinkField:  t.parentLinkField,
 		pushLabel:        t.pushLabel,
+		localLabels:      t.localLabels,
 	}
 }
 

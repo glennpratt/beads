@@ -420,6 +420,7 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 	engine := tracker.NewEngine(jt, trackerStore, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	engine.PullHooks = buildJiraPullHooks(jt, engine.OnWarning)
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Pull:     true,
