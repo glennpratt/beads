@@ -476,6 +476,21 @@ var createCmd = &cobra.Command{
 				}
 				return HandleError("failed to check parent issue: %v", err)
 			}
+
+			// The Jira push marker must be applied deliberately; a child of a
+			// Jira-bound bead is not itself bound for Jira. When a push label is
+			// configured, inherit the parent's other labels here instead of in
+			// the create role.
+			if inheritParentLabels {
+				if pushLabel, _ := parentLookupStore.GetConfig(ctx, "jira.push_label"); pushLabel != "" {
+					parentLabels, err := parentLookupStore.GetLabels(ctx, parentID)
+					if err != nil {
+						return HandleError("failed to read the labels of parent %s: %v", parentID, err)
+					}
+					labels = mergeCreateLabels(labels, withoutLabel(parentLabels, pushLabel))
+					inheritParentLabels = false
+				}
+			}
 		}
 
 		if dryRun {
@@ -844,6 +859,21 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		DeferUntil:         params.DeferUntil,
 		Metadata:           params.Metadata,
 	}
+}
+
+// withoutLabel drops label (case-insensitive) from labels; "" is a no-op.
+func withoutLabel(labels []string, label string) []string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return labels
+	}
+	out := make([]string, 0, len(labels))
+	for _, l := range labels {
+		if !strings.EqualFold(strings.TrimSpace(l), label) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func mergeCreateLabels(labels, inheritedLabels []string) []string {

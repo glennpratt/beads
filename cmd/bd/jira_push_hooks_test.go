@@ -67,3 +67,13 @@ func TestJiraPushHooksLabelGate(t *testing.T) {
 		})
 	}
 }
+
+func TestWithoutLabel(t *testing.T) {
+	got := withoutLabel([]string{"jira", "team", "JIRA", "me:x"}, " jira ")
+	if len(got) != 2 || got[0] != "team" || got[1] != "me:x" {
+		t.Errorf("withoutLabel = %v, want [team me:x]", got)
+	}
+	if got := withoutLabel([]string{"a"}, ""); len(got) != 1 {
+		t.Errorf("empty label should be a no-op, got %v", got)
+	}
+}

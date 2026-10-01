@@ -42,6 +42,7 @@ go_test(
         "engine_pull_missing_history_test.go",
         "engine_pull_overlap_test.go",
         "engine_pull_push_hash_test.go",
+        "engine_push_order_test.go",
         "engine_ratelimit_test.go",
         "engine_selective_test.go",
         "engine_test.go",
