@@ -42,3 +42,24 @@ func TestEnginePushCreatesParentsFirst(t *testing.T) {
 		t.Errorf("create order par=%d ch=%d gc=%d, want parent before child before grandchild", pos["bd-par"], pos["bd-ch"], pos["bd-gc"])
 	}
 }
+
+func TestEnginePullFullIgnoresLastSync(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		store := newPureTestStore()
+		store.localMetadata["test.last_sync"] = "2026-01-01T00:00:00Z"
+		tk := newMockTracker("test")
+		var gotSince *bool
+		tk.fetchIssues = func(_ context.Context, opts FetchOptions) ([]TrackerIssue, error) {
+			v := opts.Since != nil
+			gotSince = &v
+			return nil, nil
+		}
+		engine := NewEngine(tk, store, "test-actor")
+		if _, err := engine.Sync(context.Background(), SyncOptions{Pull: true, DryRun: true, Full: full}); err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if gotSince == nil || *gotSince == full {
+			t.Errorf("Full=%v: incremental Since set = %v, want %v", full, gotSince != nil && *gotSince, !full)
+		}
+	}
+}

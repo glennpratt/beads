@@ -423,12 +423,9 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 	engine.PullHooks = buildJiraPullHooks(jt, engine.OnWarning)
 
-	if full, _ := cmd.Flags().GetBool("full"); full {
-		restore := forceFullJiraPull(ctx, trackerStore, dryRun)
-		defer restore()
-	}
-
+	full, _ := cmd.Flags().GetBool("full")
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
+		Full:     full,
 		Pull:     true,
 		Push:     false,
 		DryRun:   dryRun,

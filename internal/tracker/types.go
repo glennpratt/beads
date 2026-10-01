@@ -72,6 +72,11 @@ type FetchOptions struct {
 
 // SyncOptions configures the behavior of a sync operation.
 type SyncOptions struct {
+	// Full ignores the last sync time for this run: every issue in scope is
+	// fetched and no pre-linked hydration is needed. It changes no stored
+	// state, so a dry run previews exactly what a full pull would do.
+	Full bool
+
 	// Pull imports issues from the external tracker.
 	Pull bool
 	// Push exports issues to the external tracker.
