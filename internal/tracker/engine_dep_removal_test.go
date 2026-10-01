@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,5 +69,55 @@ func TestEnginePullRemovesStaleTrackerParent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEnginePullKeepsStrongestDependencyPerPair(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{"bd-a", "bd-b"} {
+		ref := strPtr("https://t/" + strings.ToUpper(strings.TrimPrefix(id, "bd-")))
+		if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, ExternalRef: ref}, "test-actor"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tk := newMockTracker("test")
+	tk.issues = []TrackerIssue{{ID: "a", Identifier: "A", URL: "https://t/A", Title: "a", UpdatedAt: time.Now()}}
+	tk.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		dep := func(typ types.DependencyType) DependencyInfo {
+			return DependencyInfo{FromExternalID: "A", ToExternalID: "B", Type: string(typ), Source: DependencySourceRelation}
+		}
+		return &IssueConversion{
+			Issue:        &types.Issue{Title: ti.Title, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+			Dependencies: []DependencyInfo{dep(types.DepRelated), dep(types.DepBlocks)}, // weaker first
+		}
+	}}
+	engine := NewEngine(tk, store, "test-actor")
+	var warnings []string
+	engine.OnWarning = func(msg string) { warnings = append(warnings, msg) }
+	if _, err := engine.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none", warnings)
+	}
+	deps, err := store.GetDependenciesWithMetadata(ctx, "bd-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 || deps[0].ID != "bd-b" || deps[0].DependencyType != types.DepBlocks {
+		t.Errorf("deps = %+v, want one blocks edge to bd-b", deps)
+	}
+}
+
+func TestUniqueDependencies(t *testing.T) {
+	d := func(from, to, typ string) DependencyInfo {
+		return DependencyInfo{FromExternalID: from, ToExternalID: to, Type: typ}
+	}
+	got := uniqueDependencies([]DependencyInfo{d("A", "B", "related"), d("a", "b", "related"), d("A", "B", "blocks"), d("B", "A", "related")})
+	if len(got) != 3 || got[0] != d("A", "B", "related") || got[1].Type != "blocks" || got[2].FromExternalID != "B" {
+		t.Errorf("uniqueDependencies = %v", got)
 	}
 }

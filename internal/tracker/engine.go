@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -579,6 +580,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	}
 
 	// Create dependencies after all issues are imported
+	// Both ends of a tracker link often report the same edge.
+	pendingDeps = uniqueDependencies(pendingDeps)
+	pendingRemovals = uniqueDependencies(pendingRemovals)
+
 	depErrors := 0
 	if opts.DryRun {
 		depErrors = e.previewDependencies(ctx, pendingDeps, dryRunIssues)
@@ -1559,6 +1564,11 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 	if len(deps) == 0 {
 		return 0
 	}
+	// Strongest relationships first: a pair holds one dependency, so when a
+	// tracker reports several links between the same issues, the first
+	// created wins and later ones are skipped below.
+	deps = append([]DependencyInfo(nil), deps...)
+	sort.SliceStable(deps, func(i, j int) bool { return depStrength(deps[i].Type) > depStrength(deps[j].Type) })
 
 	resolveIssue, err := e.dependencyIssueResolver(ctx, nil)
 	if err != nil {
@@ -1585,6 +1595,10 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 			continue // Not found (no error) — expected if issue wasn't imported
 		}
 		if dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
+			continue
+		}
+		if existing := dependencyTypeBetween(ctx, e.Store, fromIssue.ID, toIssue.ID); existing != "" {
+			debug.Logf("tracker: %s -> %s already linked as %s; skipping %s from %s\n", fromIssue.ID, toIssue.ID, existing, dep.Type, e.Tracker.DisplayName())
 			continue
 		}
 
@@ -1760,6 +1774,51 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		}
 		return nil, nil
 	}, nil
+}
+
+// uniqueDependencies drops repeated (from, to, type) entries, keeping order.
+func uniqueDependencies(deps []DependencyInfo) []DependencyInfo {
+	seen := make(map[string]bool, len(deps))
+	out := deps[:0:0]
+	for _, d := range deps {
+		key := strings.ToUpper(strings.TrimSpace(d.FromExternalID)) + "\x00" + strings.ToUpper(strings.TrimSpace(d.ToExternalID)) + "\x00" + d.Type
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// depStrength orders dependency types for creation when a tracker reports
+// several relationships between the same pair.
+func depStrength(t string) int {
+	switch types.DependencyType(t) {
+	case types.DepParentChild:
+		return 4
+	case types.DepBlocks:
+		return 3
+	case types.DepDuplicates:
+		return 2
+	case types.DepRelated:
+		return 1
+	}
+	return 0
+}
+
+// dependencyTypeBetween returns the type of an existing issueID ->
+// dependsOnID dependency, or "".
+func dependencyTypeBetween(ctx context.Context, store Store, issueID, dependsOnID string) types.DependencyType {
+	records, err := store.GetDependenciesWithMetadata(ctx, issueID)
+	if err != nil {
+		return ""
+	}
+	for _, record := range records {
+		if record.ID == dependsOnID {
+			return record.DependencyType
+		}
+	}
+	return ""
 }
 
 func dependencyExists(ctx context.Context, store Store, issueID, dependsOnID string, depType types.DependencyType) bool {
