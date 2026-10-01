@@ -138,6 +138,7 @@ var pulledFields = []struct {
 	{"issue_type", func(i *types.Issue) string { return string(i.IssueType) }, func(d, s *types.Issue) { d.IssueType = s.IssueType }},
 	{"priority", func(i *types.Issue) string { return strconv.Itoa(i.Priority) }, func(d, s *types.Issue) { d.Priority = s.Priority }},
 	{"status", func(i *types.Issue) string { return string(i.Status) }, func(d, s *types.Issue) { d.Status = s.Status }},
+	{"assignee", func(i *types.Issue) string { return strings.ToLower(strings.TrimSpace(i.Assignee)) }, func(d, s *types.Issue) { d.Assignee = s.Assignee }},
 }
 
 func fieldHash(v string) string {

@@ -29,7 +29,7 @@ func (t *Tracker) HasPushLabel(issue *types.Issue) bool {
 }
 
 // PushFieldDiff returns the Jira fields ("summary", "description",
-// "issuetype", "priority", "status") that pushing local would change on
+// "issuetype", "priority", "status", "assignee") that pushing local would change on
 // remote. Type, priority and status are compared by the Jira value each side
 // maps to, so lossy mappings (an "Undetermined" priority, a "Cancelled"
 // status imported as closed, a beads-only "deferred" status) do not count as
@@ -57,6 +57,9 @@ func (t *Tracker) PushFieldDiff(local *types.Issue, remote *tracker.TrackerIssue
 	}
 	if mapper.StatusToTracker(local.Status) != mapper.StatusToTracker(r.Status) {
 		diff = append(diff, "status")
+	}
+	if !strings.EqualFold(strings.TrimSpace(local.Assignee), strings.TrimSpace(r.Assignee)) {
+		diff = append(diff, "assignee")
 	}
 	return diff
 }
@@ -278,6 +281,11 @@ func (t *Tracker) DescribeCreate(ctx context.Context, issue *types.Issue) string
 	if p, ok := fields["parent"].(map[string]string); ok {
 		parts = append(parts, "parent "+p["key"])
 	}
+	if a, ok := fields["assignee"].(map[string]interface{}); ok {
+		for _, v := range a {
+			parts = append(parts, fmt.Sprintf("assignee %v", v))
+		}
+	}
 	if labels, ok := fields["labels"].([]string); ok && len(labels) > 0 {
 		parts = append(parts, "labels "+strings.Join(labels, ","))
 	}
@@ -323,6 +331,15 @@ func (t *Tracker) transitionFields(ctx context.Context, tr Transition) map[strin
 		}
 	}
 	return map[string]interface{}{"resolution": map[string]string{"name": choice}}
+}
+
+// assigneeValue builds the assignee field: {"name": u} on Server/DC (v2),
+// {"accountId": u} on Cloud (v3).
+func (m *jiraFieldMapper) assigneeValue(user string) map[string]interface{} {
+	if m.apiVersion == "2" {
+		return map[string]interface{}{"name": user}
+	}
+	return map[string]interface{}{"accountId": user}
 }
 
 // jiraLabels returns labels to send to Jira, without the push marker or

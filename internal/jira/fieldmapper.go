@@ -205,6 +205,7 @@ func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueC
 
 	if ji.Fields.Assignee != nil {
 		issue.Owner = ji.Fields.Assignee.DisplayName
+		issue.Assignee = ji.Fields.Assignee.Login()
 	}
 
 	if ji.Fields.Labels != nil {
@@ -279,6 +280,11 @@ func (m *jiraFieldMapper) IssueToTracker(issue *types.Issue) map[string]interfac
 	priorityName := m.PriorityToTracker(issue.Priority)
 	if name, ok := priorityName.(string); ok {
 		fields["priority"] = map[string]string{"name": name}
+	}
+
+	// Set assignee (username on Server/DC, account ID on Cloud).
+	if a := strings.TrimSpace(issue.Assignee); a != "" {
+		fields["assignee"] = m.assigneeValue(a)
 	}
 
 	// Set labels, minus the local push marker.

@@ -379,6 +379,8 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 			fields[name] = v
 		} else if name == "description" {
 			fields[name] = "" // cleared locally
+		} else if name == "assignee" {
+			fields[name] = nil // unassigned locally
 		}
 	}
 
@@ -535,7 +537,7 @@ func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.Tracke
 	if ji.Fields.Assignee != nil {
 		ti.Assignee = ji.Fields.Assignee.DisplayName
 		ti.AssigneeEmail = ji.Fields.Assignee.EmailAddress
-		ti.AssigneeID = ji.Fields.Assignee.AccountID
+		ti.AssigneeID = ji.Fields.Assignee.Login()
 	}
 
 	// Timestamps
