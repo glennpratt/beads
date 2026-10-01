@@ -325,8 +325,18 @@ type Field struct {
 // Custom field plugin types for Jira Server/DC hierarchy links.
 const (
 	epicLinkFieldType   = "com.pyxis.greenhopper.jira:gh-epic-link"   // Story -> Epic
+	epicNameFieldType   = "com.pyxis.greenhopper.jira:gh-epic-label"  // Required when creating an Epic
 	parentLinkFieldType = "com.atlassian.jpo:jpo-custom-field-parent" // Advanced Roadmaps: Epic -> higher levels
 )
+
+// HierarchyFields holds the Server/DC custom field IDs used for issue
+// hierarchy. Each is empty when the instance does not have it (Jira Cloud
+// uses the standard parent field instead).
+type HierarchyFields struct {
+	EpicLink   string
+	EpicName   string
+	ParentLink string
+}
 
 // GetFields lists all Jira fields (system and custom).
 func (c *Client) GetFields(ctx context.Context) ([]Field, error) {
@@ -341,23 +351,25 @@ func (c *Client) GetFields(ctx context.Context) ([]Field, error) {
 	return fields, nil
 }
 
-// DiscoverHierarchyFields finds the Epic Link and Parent Link custom field
-// IDs by plugin type. Either is empty when the instance does not have it
-// (Jira Cloud uses the standard parent field instead).
-func (c *Client) DiscoverHierarchyFields(ctx context.Context) (epicLink, parentLink string, err error) {
+// DiscoverHierarchyFields finds the Epic Link, Epic Name and Parent Link
+// custom field IDs by plugin type.
+func (c *Client) DiscoverHierarchyFields(ctx context.Context) (HierarchyFields, error) {
+	var hf HierarchyFields
 	fields, err := c.GetFields(ctx)
 	if err != nil {
-		return "", "", err
+		return hf, err
 	}
 	for _, f := range fields {
 		switch f.Schema.Custom {
 		case epicLinkFieldType:
-			epicLink = f.ID
+			hf.EpicLink = f.ID
+		case epicNameFieldType:
+			hf.EpicName = f.ID
 		case parentLinkFieldType:
-			parentLink = f.ID
+			hf.ParentLink = f.ID
 		}
 	}
-	return epicLink, parentLink, nil
+	return hf, nil
 }
 
 // SearchIssues queries Jira using JQL and returns all matching issues, handling pagination.
