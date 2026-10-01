@@ -422,11 +422,12 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	}
 	currentTI := jiraToTrackerIssue(current, t.priorityMap)
 	diff := t.PushFieldDiff(issue, &currentTI)
-	if len(diff) == 0 {
+	rc := t.relationDiff(ctx, issue)
+	if len(diff) == 0 && rc.empty() {
 		debug.Logf("jira: update %s (%s): no changes\n", externalID, issue.ID)
 		return &currentTI, nil
 	}
-	debug.Logf("jira: update %s (%s): changed %s\n", externalID, issue.ID, strings.Join(diff, ","))
+	debug.Logf("jira: update %s (%s): changed %s %v\n", externalID, issue.ID, strings.Join(diff, ","), rc.describe())
 
 	all := mapper.IssueToTracker(issue)
 	fields := make(map[string]interface{})
@@ -445,11 +446,27 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 		}
 	}
 
+	if rc.parentChanged {
+		var v interface{}
+		switch {
+		case rc.newParent == "":
+			v = nil
+		case rc.parentField == "parent":
+			v = map[string]string{"key": rc.newParent}
+		default:
+			v = rc.newParent
+		}
+		fields[rc.parentField] = v
+	}
 	if len(fields) > 0 {
 		if err := t.client.UpdateIssue(ctx, externalID, fields); err != nil {
 			return nil, err
 		}
 	}
+	if err := t.applyRelationLinks(ctx, externalID, rc); err != nil {
+		return nil, err
+	}
+	t.recordPushedRelations(ctx, issue, rc)
 	if statusChanged {
 		if err := t.applyTransition(ctx, externalID, issue.Status); err != nil {
 			return nil, err
