@@ -56,6 +56,10 @@ type Tracker struct {
 	subtaskTypes    []string
 	subtaskResolved bool
 
+	// Create-screen metadata cache for dry-run checks.
+	createTypes  map[string][]ProjectIssueType
+	createFields map[string][]CreateField
+
 	// Pull scopes and boards (see boards.go).
 	scopes         []namedScope
 	boards         []*boardSpec
@@ -393,10 +397,11 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	mapper := t.FieldMapper()
 	fields := mapper.IssueToTracker(issue)
 
-	// Set project to primary (first) project key.
-	fields["project"] = map[string]string{"key": t.PrimaryProjectKey()}
-
+	fields["project"] = map[string]string{"key": t.targetProject(ctx, issue)}
 	warnings := t.applyCreateHierarchy(ctx, issue, fields)
+	for k, v := range extraCreateFields(issue) {
+		fields[k] = v
+	}
 	debug.Logf("jira: create %s fields: %s\n", issue.ID, strings.Join(sortedKeys(fields), ","))
 
 	created, err := t.client.CreateIssue(ctx, fields)

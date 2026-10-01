@@ -389,6 +389,33 @@ func (c *Client) GetProjectIssueTypes(ctx context.Context, projectKey string) ([
 	return append(result.Values, result.IssueTypes...), nil
 }
 
+// CreateField describes a field on a project/issue type create screen.
+type CreateField struct {
+	FieldID         string `json:"fieldId"`
+	Name            string `json:"name"`
+	Required        bool   `json:"required"`
+	HasDefaultValue bool   `json:"hasDefaultValue"`
+}
+
+// GetCreateFields lists the create-screen fields for a project and issue
+// type ID (GET issue/createmeta/{project}/issuetypes/{id}; Server/DC returns
+// "values", Cloud "fields").
+func (c *Client) GetCreateFields(ctx context.Context, projectKey, issueTypeID string) ([]CreateField, error) {
+	apiURL := fmt.Sprintf("%s/issue/createmeta/%s/issuetypes/%s?maxResults=200", c.apiBase(), url.PathEscape(projectKey), url.PathEscape(issueTypeID))
+	body, err := c.doRequest(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list create fields for %s: %w", projectKey, err)
+	}
+	var result struct {
+		Values []CreateField `json:"values"`
+		Fields []CreateField `json:"fields"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse create fields: %w", err)
+	}
+	return append(result.Values, result.Fields...), nil
+}
+
 // GetFields lists all Jira fields (system and custom).
 func (c *Client) GetFields(ctx context.Context) ([]Field, error) {
 	body, err := c.doRequest(ctx, "GET", c.apiBase()+"/field", nil)

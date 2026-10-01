@@ -275,9 +275,18 @@ func (t *Tracker) jiraParents(ctx context.Context, issueID string) []jiraParent 
 func (t *Tracker) DescribeCreate(ctx context.Context, issue *types.Issue) string {
 	t.resolveHierarchyFields(ctx)
 	fields := t.FieldMapper().IssueToTracker(issue)
+	project := t.targetProject(ctx, issue)
+	fields["project"] = map[string]string{"key": project}
 	warnings := t.applyCreateHierarchy(ctx, issue, fields)
+	for k, v := range extraCreateFields(issue) {
+		fields[k] = v
+	}
+	warnings = append(warnings, t.createCheck(ctx, project, fields)...)
 
 	var parts []string
+	if project != t.PrimaryProjectKey() {
+		parts = append(parts, "in "+project)
+	}
 	if it, ok := fields["issuetype"].(map[string]string); ok {
 		parts = append(parts, it["name"])
 	}
@@ -375,4 +384,99 @@ func sortedKeys(m map[string]interface{}) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// targetProject picks the Jira project for creating a bead: metadata
+// jira_project, else the project of its Jira-linked parent, else the primary
+// project.
+func (t *Tracker) targetProject(ctx context.Context, issue *types.Issue) string {
+	if p := strings.TrimSpace(metadataString(issue.Metadata, "jira_project")); p != "" {
+		return strings.ToUpper(p)
+	}
+	if parents := t.jiraParents(ctx, issue.ID); len(parents) > 0 {
+		if i := strings.LastIndex(parents[0].key, "-"); i > 0 {
+			return parents[0].key[:i]
+		}
+	}
+	return t.PrimaryProjectKey()
+}
+
+// extraCreateFields returns metadata jira_fields: raw Jira field values
+// (by field ID or system name) merged into the create payload, e.g.
+// {"components": [{"name": "IPAM"}]}.
+func extraCreateFields(issue *types.Issue) map[string]interface{} {
+	if len(issue.Metadata) == 0 {
+		return nil
+	}
+	var m struct {
+		Fields map[string]interface{} `json:"jira_fields"`
+	}
+	if json.Unmarshal(issue.Metadata, &m) != nil {
+		return nil
+	}
+	return m.Fields
+}
+
+// createCheck reports problems a create would hit in project: an issue type
+// the project lacks, or required fields without a default that the payload
+// does not set. Results are cached per project and type.
+func (t *Tracker) createCheck(ctx context.Context, project string, fields map[string]interface{}) []string {
+	if t.client == nil || project == "" {
+		return nil
+	}
+	typeName := ""
+	if it, ok := fields["issuetype"].(map[string]string); ok {
+		typeName = it["name"]
+	}
+	if t.createTypes == nil {
+		t.createTypes = map[string][]ProjectIssueType{}
+		t.createFields = map[string][]CreateField{}
+	}
+	its, ok := t.createTypes[project]
+	if !ok {
+		var err error
+		its, err = t.client.GetProjectIssueTypes(ctx, project)
+		if err != nil {
+			debug.Logf("jira: create check for %s: %v\n", project, err)
+			return nil
+		}
+		t.createTypes[project] = its
+	}
+	typeID := ""
+	for _, it := range its {
+		if strings.EqualFold(it.Name, typeName) {
+			typeID = it.ID
+		}
+	}
+	if typeID == "" {
+		names := make([]string, 0, len(its))
+		for _, it := range its {
+			names = append(names, it.Name)
+		}
+		return []string{fmt.Sprintf("%s has no issue type %q (has: %s)", project, typeName, strings.Join(names, ", "))}
+	}
+	cacheKey := project + "/" + typeID
+	cfs, ok := t.createFields[cacheKey]
+	if !ok {
+		var err error
+		cfs, err = t.client.GetCreateFields(ctx, project, typeID)
+		if err != nil {
+			debug.Logf("jira: create check for %s %s: %v\n", project, typeName, err)
+			return nil
+		}
+		t.createFields[cacheKey] = cfs
+	}
+	var missing []string
+	for _, f := range cfs {
+		if !f.Required || f.HasDefaultValue {
+			continue
+		}
+		if _, ok := fields[f.FieldID]; !ok {
+			missing = append(missing, f.Name+" ("+f.FieldID+")")
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s %s requires: %s (set with metadata jira_fields)", project, typeName, strings.Join(missing, ", "))}
 }

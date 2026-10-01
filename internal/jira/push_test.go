@@ -316,6 +316,7 @@ func TestDescribeCreate(t *testing.T) {
 	tr := &Tracker{
 		store:             &depStore{configStore: &configStore{data: map[string]string{}}, deps: []*types.IssueWithDependencyMetadata{parentDep(jiraURL+"/browse/P-1", types.TypeEpic)}},
 		jiraURL:           jiraURL,
+		projectKeys:       []string{"P"},
 		typeMap:           map[string]string{"story": "Story"},
 		pushLabel:         "jira",
 		hierarchyResolved: true,
@@ -431,5 +432,42 @@ func TestUpdateIssueUnassignSendsNull(t *testing.T) {
 	fields, _ := rj.puts[0]["fields"].(map[string]interface{})
 	if v, ok := fields["assignee"]; !ok || v != nil || len(fields) != 1 {
 		t.Errorf("PUT fields = %#v, want only assignee: null", fields)
+	}
+}
+
+func TestCreateTargetProjectAndCheck(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/createmeta/OTHER/issuetypes"):
+			_, _ = w.Write([]byte(`{"values":[{"id":"3","name":"Task","subtask":false}]}`))
+		case strings.HasSuffix(r.URL.Path, "/createmeta/OTHER/issuetypes/3"):
+			_, _ = w.Write([]byte(`{"values":[
+				{"fieldId":"summary","name":"Summary","required":true},
+				{"fieldId":"customfield_9","name":"Component Owner","required":true},
+				{"fieldId":"priority","name":"Priority","required":true,"hasDefaultValue":true}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	tr := &Tracker{client: newTestClient(srv.URL, "2"), store: &depStore{configStore: &configStore{data: map[string]string{}}}, projectKeys: []string{"P"}, hierarchyResolved: true, typeMap: map[string]string{"story": "Story"}}
+
+	task := &types.Issue{ID: "gp-1", Title: "t", IssueType: types.TypeTask, Metadata: json.RawMessage(`{"jira_project":"other"}`)}
+	if got := tr.targetProject(context.Background(), task); got != "OTHER" {
+		t.Errorf("target project = %q, want OTHER", got)
+	}
+	got := tr.DescribeCreate(context.Background(), task)
+	if !strings.Contains(got, "in OTHER") || !strings.Contains(got, "requires: Component Owner (customfield_9)") || strings.Contains(got, "Priority") {
+		t.Errorf("describe = %q", got)
+	}
+
+	task.Metadata = json.RawMessage(`{"jira_project":"OTHER","jira_fields":{"customfield_9":{"name":"me"}}}`)
+	if got := tr.DescribeCreate(context.Background(), task); strings.Contains(got, "requires") {
+		t.Errorf("jira_fields should satisfy the requirement, got %q", got)
+	}
+
+	story := &types.Issue{ID: "gp-2", Title: "s", IssueType: types.TypeStory, Metadata: json.RawMessage(`{"jira_project":"OTHER"}`)}
+	if got := tr.DescribeCreate(context.Background(), story); !strings.Contains(got, `OTHER has no issue type "Story" (has: Task)`) {
+		t.Errorf("missing type not reported: %q", got)
 	}
 }
