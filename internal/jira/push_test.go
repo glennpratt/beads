@@ -105,6 +105,8 @@ func (rj *recordingJira) server(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/field"):
 			_, _ = w.Write([]byte(`[]`))
+		case strings.HasSuffix(r.URL.Path, "/issuetypes"):
+			_, _ = w.Write([]byte(`{"values":[{"id":"7","name":"Story","subtask":false},{"id":"8","name":"Approval","subtask":true},{"id":"5","name":"Technical Sub-task","subtask":true},{"id":"9","name":"Sub-task","subtask":true}]}`))
 		case r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(rj.issue))
 		case r.Method == http.MethodPut:
@@ -178,6 +180,11 @@ func parentDep(ref string, it types.IssueType) *types.IssueWithDependencyMetadat
 	return d
 }
 
+func withJiraType(d *types.IssueWithDependencyMetadata, jiraType string) *types.IssueWithDependencyMetadata {
+	d.Metadata = json.RawMessage(`{"jira_type":"` + jiraType + `"}`)
+	return d
+}
+
 func TestCreateIssueHierarchyAndLabels(t *testing.T) {
 	const jiraURL = "https://jira.example.com"
 	server := HierarchyFields{EpicLink: "customfield_1", EpicName: "customfield_2", ParentLink: "customfield_3"}
@@ -198,7 +205,7 @@ func TestCreateIssueHierarchyAndLabels(t *testing.T) {
 		},
 		{
 			name: "epic under capability (Server)", fields: server, issueType: types.TypeEpic,
-			parents: []*types.IssueWithDependencyMetadata{parentDep(jiraURL+"/browse/P-0", types.TypeTask)},
+			parents: []*types.IssueWithDependencyMetadata{parentDep(jiraURL+"/browse/P-0", types.TypeMilestone)},
 			wantSet: map[string]interface{}{"customfield_3": "P-0", "customfield_2": "New work"},
 		},
 		{
@@ -212,9 +219,28 @@ func TestCreateIssueHierarchyAndLabels(t *testing.T) {
 			wantAbsent: []string{"customfield_1", "parent"},
 		},
 		{
-			name: "story parent is not placed", fields: server, issueType: types.TypeTask,
-			parents:    []*types.IssueWithDependencyMetadata{parentDep(jiraURL+"/browse/P-10", types.TypeStory)},
+			name: "task under story becomes sub-task", fields: server, issueType: types.TypeTask,
+			parents: []*types.IssueWithDependencyMetadata{parentDep(jiraURL+"/browse/P-10", types.TypeStory)},
+			wantSet: map[string]interface{}{
+				"parent":    map[string]interface{}{"key": "P-10"},
+				"issuetype": map[string]interface{}{"name": "Sub-task"},
+			},
+			wantAbsent: []string{"customfield_1"},
+		},
+		{
+			name: "sub-task parent cannot nest", fields: server, issueType: types.TypeTask,
+			parents:    []*types.IssueWithDependencyMetadata{withJiraType(parentDep(jiraURL+"/browse/P-11", types.TypeTask), "Technical Sub-task")},
 			wantAbsent: []string{"customfield_1", "parent"}, wantWarnings: 1,
+		},
+		{
+			name: "epic under story is not placed", fields: server, issueType: types.TypeEpic,
+			parents:    []*types.IssueWithDependencyMetadata{parentDep(jiraURL+"/browse/P-10", types.TypeStory)},
+			wantAbsent: []string{"customfield_3", "parent"}, wantWarnings: 1,
+		},
+		{
+			name: "epic under pulled Capability (task bead, Jira type Capability)", fields: server, issueType: types.TypeEpic,
+			parents: []*types.IssueWithDependencyMetadata{withJiraType(parentDep(jiraURL+"/browse/P-0", types.TypeTask), "Capability")},
+			wantSet: map[string]interface{}{"customfield_3": "P-0", "customfield_2": "New work"},
 		},
 		{
 			name: "epic parent preferred over story parent", fields: server, issueType: types.TypeStory,
@@ -325,5 +351,21 @@ func TestTransitionFieldsResolution(t *testing.T) {
 	_ = json.Unmarshal([]byte(`{"id":"411","name":"Cancel","to":{"name":"Cancelled"}}`), &optional)
 	if f := (&Tracker{}).transitionFields(context.Background(), optional); f != nil {
 		t.Errorf("no resolution field should send no fields, got %v", f)
+	}
+}
+
+func TestSubtaskTypeSelection(t *testing.T) {
+	for _, tt := range []struct {
+		types []string
+		want  string
+	}{
+		{[]string{"Approval", "Sub-Risk", "Sub-task"}, "Sub-task"},
+		{[]string{"Approval", "Subtask"}, "Subtask"},
+		{[]string{"Technical Sub-task"}, "Technical Sub-task"},
+	} {
+		tr := &Tracker{subtaskTypes: tt.types, subtaskResolved: true}
+		if got := tr.subtaskType(context.Background()); got != tt.want {
+			t.Errorf("subtaskType(%v) = %q, want %q", tt.types, got, tt.want)
+		}
 	}
 }

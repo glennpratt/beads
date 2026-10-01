@@ -204,6 +204,11 @@ const (
 type IssueConversion struct {
 	Issue        *types.Issue
 	Dependencies []DependencyInfo
+
+	// RemoveDependencies lists tracker-owned dependencies that no longer
+	// exist in the tracker (e.g. an issue moved to another parent). They are
+	// removed after import if present and the store supports removal.
+	RemoveDependencies []DependencyInfo
 }
 
 // DependencyInfo describes a dependency to create after all issues are imported.

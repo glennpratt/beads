@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -80,6 +81,14 @@ func (t *Tracker) MergePulledLabels(extIssue *tracker.TrackerIssue, conv *tracke
 					lastJira[strings.ToLower(s)] = true
 				}
 			}
+		}
+	}
+
+	// Tracker-supplied metadata for this pull (e.g. jira_type) wins over the
+	// stored values; other local keys are kept.
+	if meta != nil && extIssue != nil {
+		for k, v := range extIssue.Metadata {
+			meta[k] = v
 		}
 	}
 
@@ -182,5 +191,50 @@ func (t *Tracker) MergePulled(extIssue *tracker.TrackerIssue, conv *tracker.Issu
 		warnings = append(warnings, fmt.Sprintf("%s: %s changed both locally and in Jira; kept Jira's (local value is in bd history)", existing.ID, f.name))
 	}
 	meta[jiraPulledMetadataKey] = record
+	t.reconcileParents(extIssue, conv, existing, meta)
 	return warnings
+}
+
+// jiraParentsMetadataKey records the Jira parent keys seen on the last pull.
+const jiraParentsMetadataKey = "jira_parents"
+
+// reconcileParents records this pull's Jira parents and, when a parent
+// recorded on the last pull is gone (the issue moved), asks the engine to
+// remove that parent-child edge. Parents added locally were never recorded,
+// so they are never removed; without a record nothing is removed.
+func (t *Tracker) reconcileParents(extIssue *tracker.TrackerIssue, conv *tracker.IssueConversion, existing *types.Issue, meta map[string]interface{}) {
+	current := make([]string, 0, 2)
+	currentSet := make(map[string]bool, 2)
+	for _, d := range conv.Dependencies {
+		if d.Source == tracker.DependencySourceParent && d.Type == string(types.DepParentChild) {
+			key := strings.ToUpper(strings.TrimSpace(d.ToExternalID))
+			if key != "" && !currentSet[key] {
+				currentSet[key] = true
+				current = append(current, key)
+			}
+		}
+	}
+	sort.Strings(current)
+
+	if existing != nil && len(existing.Metadata) > 0 && extIssue.Identifier != "" {
+		var m map[string]interface{}
+		if json.Unmarshal(existing.Metadata, &m) == nil {
+			if last, ok := m[jiraParentsMetadataKey].([]interface{}); ok {
+				for _, v := range last {
+					key, _ := v.(string)
+					key = strings.ToUpper(strings.TrimSpace(key))
+					if key == "" || currentSet[key] {
+						continue
+					}
+					conv.RemoveDependencies = append(conv.RemoveDependencies, tracker.DependencyInfo{
+						FromExternalID: extIssue.Identifier,
+						ToExternalID:   key,
+						Type:           string(types.DepParentChild),
+						Source:         tracker.DependencySourceParent,
+					})
+				}
+			}
+		}
+	}
+	meta[jiraParentsMetadataKey] = current
 }

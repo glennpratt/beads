@@ -166,6 +166,12 @@ func (s *uowStore) ApplyIssueUpdate(ctx context.Context, id string, updates map[
 	})
 }
 
+func (s *uowStore) RemoveDependency(ctx context.Context, issueID, dependsOnID, actor string) error {
+	return uow.RunTx(ctx, s.provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		return "bd: tracker dependency removal", uw.DependencyUseCase().RemoveDependency(ctx, issueID, dependsOnID, actor)
+	})
+}
+
 func (s *uowStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	return uow.RunTx(ctx, s.provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		_, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{})

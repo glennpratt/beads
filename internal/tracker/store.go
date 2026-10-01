@@ -26,6 +26,14 @@ type Store interface {
 	AddDependency(context.Context, *types.Dependency, string) error
 }
 
+// DependencyRemover is the optional capability to remove a dependency, used
+// when a tracker reports that a relationship it owns no longer exists.
+type DependencyRemover interface {
+	RemoveDependency(ctx context.Context, issueID, dependsOnID, actor string) error
+}
+
+var _ DependencyRemover = (*directStore)(nil)
+
 // IssueUpdater is the optional atomic lifecycle-plus-label update capability.
 type IssueUpdater interface {
 	ApplyIssueUpdate(context.Context, string, map[string]interface{}, []string, string) error
