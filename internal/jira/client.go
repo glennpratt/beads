@@ -139,9 +139,23 @@ type ProjectField struct {
 
 // UserField represents a Jira user.
 type UserField struct {
-	AccountID    string `json:"accountId"`
+	AccountID    string `json:"accountId"` // Jira Cloud
+	Name         string `json:"name"`      // Jira Server/DC username
+	Key          string `json:"key"`       // Jira Server/DC user key
 	DisplayName  string `json:"displayName"`
 	EmailAddress string `json:"emailAddress"`
+}
+
+// Login returns the identifier used to assign issues: the username on
+// Server/DC, the account ID on Cloud.
+func (u *UserField) Login() string {
+	if u == nil {
+		return ""
+	}
+	if u.Name != "" {
+		return u.Name
+	}
+	return u.AccountID
 }
 
 // ResolutionField represents a Jira resolution.

@@ -239,3 +239,29 @@ func TestReconcileParents(t *testing.T) {
 		t.Errorf("parent cleared in Jira: removals %v, record %v", conv.RemoveDependencies, meta["jira_parents"])
 	}
 }
+
+func TestMergePulledKeepsPendingAssignee(t *testing.T) {
+	tr := &Tracker{}
+	remote := func(assignee string) *types.Issue {
+		return &types.Issue{Title: "T", IssueType: types.TypeStory, Priority: 2, Status: types.StatusOpen, Assignee: assignee}
+	}
+	pull := func(existing, r *types.Issue) (*types.Issue, *types.Issue) {
+		cp := *r
+		conv := &tracker.IssueConversion{Issue: &cp}
+		ext := &tracker.TrackerIssue{Metadata: map[string]interface{}{}}
+		tr.MergePulled(ext, conv, existing)
+		stored := *conv.Issue
+		raw, _ := json.Marshal(ext.Metadata)
+		stored.Metadata, stored.ID = raw, "gp-1"
+		return conv.Issue, &stored
+	}
+	_, bead := pull(nil, remote("evaldez"))
+	local := *bead
+	local.Assignee = "gpratt" // claimed locally, not pushed yet
+	if got, _ := pull(&local, remote("evaldez")); got.Assignee != "gpratt" {
+		t.Errorf("assignee = %q, want pending local gpratt", got.Assignee)
+	}
+	if got, _ := pull(bead, remote("lwoodard")); got.Assignee != "lwoodard" {
+		t.Errorf("assignee = %q, want Jira reassignment lwoodard", got.Assignee)
+	}
+}

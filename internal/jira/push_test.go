@@ -369,3 +369,67 @@ func TestSubtaskTypeSelection(t *testing.T) {
 		}
 	}
 }
+
+func TestAssigneeMapping(t *testing.T) {
+	var server, cloud Issue
+	_ = json.Unmarshal([]byte(`{"key":"P-1","fields":{"summary":"s","assignee":{"name":"gpratt","displayName":"Glenn Pratt"}}}`), &server)
+	_ = json.Unmarshal([]byte(`{"key":"P-2","fields":{"summary":"s","assignee":{"accountId":"5b10ac8d","displayName":"Glenn Pratt"}}}`), &cloud)
+
+	m := &jiraFieldMapper{apiVersion: "2"}
+	got := m.IssueToBeads(&tracker.TrackerIssue{Raw: &server}).Issue
+	if got.Assignee != "gpratt" || got.Owner != "Glenn Pratt" {
+		t.Errorf("server pull: assignee %q owner %q", got.Assignee, got.Owner)
+	}
+	if got := m.IssueToBeads(&tracker.TrackerIssue{Raw: &cloud}).Issue; got.Assignee != "5b10ac8d" {
+		t.Errorf("cloud pull: assignee %q, want account ID", got.Assignee)
+	}
+
+	if a := (&jiraFieldMapper{apiVersion: "2"}).IssueToTracker(&types.Issue{Title: "t", Assignee: "gpratt"})["assignee"]; !reflect.DeepEqual(a, map[string]interface{}{"name": "gpratt"}) {
+		t.Errorf("v2 create assignee = %#v", a)
+	}
+	if a := (&jiraFieldMapper{apiVersion: "3"}).IssueToTracker(&types.Issue{Title: "t", Assignee: "5b10ac8d"})["assignee"]; !reflect.DeepEqual(a, map[string]interface{}{"accountId": "5b10ac8d"}) {
+		t.Errorf("v3 create assignee = %#v", a)
+	}
+	if _, ok := m.IssueToTracker(&types.Issue{Title: "t"})["assignee"]; ok {
+		t.Error("unassigned bead should not send assignee on create")
+	}
+}
+
+func TestPushFieldDiffAssignee(t *testing.T) {
+	tr := &Tracker{apiVersion: "2", typeMap: map[string]string{"story": "Story"}}
+	var ji Issue
+	_ = json.Unmarshal([]byte(`{"key":"P-10","fields":{"summary":"s","issuetype":{"name":"Story"},"status":{"name":"Open"},"assignee":{"name":"evaldez"}}}`), &ji)
+	remote := jiraToTrackerIssue(&ji, nil)
+	local := tr.FieldMapper().IssueToBeads(&remote).Issue
+
+	local.Assignee = "EValdez"
+	if d := tr.PushFieldDiff(local, &remote); len(d) != 0 {
+		t.Errorf("case-only difference should not diff, got %v", d)
+	}
+	local.Assignee = "gpratt"
+	if d := tr.PushFieldDiff(local, &remote); !reflect.DeepEqual(d, []string{"assignee"}) {
+		t.Errorf("reassign diff = %v", d)
+	}
+}
+
+func TestUpdateIssueUnassignSendsNull(t *testing.T) {
+	rj := &recordingJira{issue: `{"key":"P-10","fields":{"summary":"s","issuetype":{"name":"Story"},"status":{"name":"Open"},"assignee":{"name":"evaldez"}}}`}
+	srv := rj.server(t)
+	tr := &Tracker{client: newTestClient(srv.URL, "2"), apiVersion: "2", typeMap: map[string]string{"story": "Story"}, hierarchyResolved: true}
+	var ji Issue
+	_ = json.Unmarshal([]byte(rj.issue), &ji)
+	remote := jiraToTrackerIssue(&ji, nil)
+	local := tr.FieldMapper().IssueToBeads(&remote).Issue
+	local.Assignee = ""
+
+	if _, err := tr.UpdateIssue(context.Background(), "P-10", local); err != nil {
+		t.Fatal(err)
+	}
+	if len(rj.puts) != 1 {
+		t.Fatalf("puts = %d, want 1", len(rj.puts))
+	}
+	fields, _ := rj.puts[0]["fields"].(map[string]interface{})
+	if v, ok := fields["assignee"]; !ok || v != nil || len(fields) != 1 {
+		t.Errorf("PUT fields = %#v, want only assignee: null", fields)
+	}
+}
