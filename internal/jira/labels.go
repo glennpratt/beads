@@ -195,6 +195,7 @@ func (t *Tracker) MergePulled(ctx context.Context, extIssue *tracker.TrackerIssu
 	}
 	meta[jiraPulledMetadataKey] = record
 	t.reconcileParents(extIssue, conv, existing, meta)
+	reconcileLinks(conv, existing, meta)
 	return warnings
 }
 

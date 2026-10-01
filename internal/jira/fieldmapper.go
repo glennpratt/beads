@@ -19,6 +19,7 @@ type jiraFieldMapper struct {
 	epicLinkField    string                            // Epic Link custom field ID (Server/DC), "" if unavailable
 	parentLinkField  string                            // Parent Link custom field ID (Advanced Roadmaps), "" if unavailable
 	pushLabel        string                            // jira.push_label marker; never sent to Jira
+	linkMap          map[string]string                 // jira.link_map overrides (see links.go)
 	localLabels      []string                          // jira.local_labels glob patterns; never sent to Jira
 }
 
@@ -220,7 +221,7 @@ func (m *jiraFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.IssueC
 
 	return &tracker.IssueConversion{
 		Issue:        issue,
-		Dependencies: m.parentDependencies(ji),
+		Dependencies: strongestPerPair(append(m.parentDependencies(ji), m.linkDependencies(ji)...)),
 	}
 }
 

@@ -330,20 +330,3 @@ func (t *Tracker) applyBoardMembership(ctx context.Context, extIssue *tracker.Tr
 		}
 	}
 }
-
-// searchKeys fetches issues by key in chunks.
-func (t *Tracker) searchKeys(ctx context.Context, keys []string) ([]Issue, error) {
-	var out []Issue
-	for start := 0; start < len(keys); start += 100 {
-		end := start + 100
-		if end > len(keys) {
-			end = len(keys)
-		}
-		issues, err := t.client.SearchIssues(ctx, "key in ("+strings.Join(keys[start:end], ", ")+")")
-		if err != nil {
-			return out, err
-		}
-		out = append(out, issues...)
-	}
-	return out, nil
-}
