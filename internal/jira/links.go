@@ -300,7 +300,7 @@ func (t *Tracker) searchKeyChunk(ctx context.Context, chunk []string, cond strin
 // refreshTrackedKeys returns local Jira-linked issues outside this pull's
 // results that changed since the last sync: issues pulled via a link or
 // that left every scope (e.g. a ticket that left a board) stay current.
-func (t *Tracker) refreshTrackedKeys(ctx context.Context, since time.Time, local, fetchedKeys map[string]bool) ([]Issue, error) {
+func (t *Tracker) refreshTrackedKeys(ctx context.Context, since *time.Time, local, fetchedKeys map[string]bool) ([]Issue, error) {
 	var keys []string
 	for k := range local {
 		if !fetchedKeys[k] {
@@ -311,7 +311,11 @@ func (t *Tracker) refreshTrackedKeys(ctx context.Context, since time.Time, local
 		return nil, nil
 	}
 	sort.Strings(keys)
-	issues, err := t.searchKeysWhere(ctx, keys, updatedSinceJQL(since, time.Now()))
+	cond := ""
+	if since != nil {
+		cond = updatedSinceJQL(*since, time.Now())
+	}
+	issues, err := t.searchKeysWhere(ctx, keys, cond)
 	if err != nil {
 		return nil, fmt.Errorf("refreshing tracked issues: %w", err)
 	}

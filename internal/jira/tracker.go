@@ -362,17 +362,11 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 	if err != nil {
 		return nil, err
 	}
-	// Issues outside every scope (pulled via a link, or that left a scope)
-	// only refresh here.
-	if opts.Since != nil {
-		extra, err := t.refreshTrackedKeys(ctx, *opts.Since, local, fetched)
-		if err != nil {
-			return nil, err
-		}
-		addIssues(extra)
-	}
-	// Follow links one hop to issues not yet pulled.
-	if follow := t.linkedKeysToFollow(ctx, issues, fetched, local); len(follow) > 0 {
+	// Follow links one hop from in-scope issues only (search and board
+	// drift). Issues reached through a link, including ones refreshed below,
+	// are never followed further, or each pull would widen the scope.
+	inScope := append([]Issue(nil), issues...)
+	if follow := t.linkedKeysToFollow(ctx, inScope, fetched, local); len(follow) > 0 {
 		debug.Logf("jira: following links to %d issues outside the pull scope\n", len(follow))
 		extra, err := t.searchKeysWhere(ctx, follow, "")
 		if err != nil {
@@ -380,6 +374,13 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 		}
 		addIssues(extra)
 	}
+	// Issues outside every scope (pulled via a link, or that left a scope)
+	// only refresh here: changed ones on incremental pulls, all on full pulls.
+	extra, err := t.refreshTrackedKeys(ctx, opts.Since, local, fetched)
+	if err != nil {
+		return nil, err
+	}
+	addIssues(extra)
 
 	result := make([]tracker.TrackerIssue, 0, len(issues))
 	for i := range issues {
@@ -674,6 +675,13 @@ func jiraToTrackerIssue(ji *Issue, priorityMap map[string]string) tracker.Tracke
 	}
 	if ji.Fields.Priority != nil {
 		ti.Metadata["jira_priority"] = ji.Fields.Priority.Name
+	}
+	// Jira's timestamps (bead created_at/updated_at are local).
+	if ji.Fields.Created != "" {
+		ti.Metadata["jira_created"] = ji.Fields.Created
+	}
+	if ji.Fields.Updated != "" {
+		ti.Metadata["jira_updated"] = ji.Fields.Updated
 	}
 
 	return ti

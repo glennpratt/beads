@@ -212,16 +212,17 @@ func TestFetchIssuesFetchesBoardDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var keyQuery string
+	var keyQueries []string
 	for _, q := range f.queries {
 		if strings.HasPrefix(q, "key in") {
-			keyQuery = q
+			keyQueries = append(keyQueries, q)
 		}
 	}
-	if keyQuery != "key in (P-3, P-4)" {
-		t.Errorf("drift query = %q, want key in (P-3, P-4)", keyQuery)
+	// Drift first; a full pull then refreshes the other tracked issues.
+	if len(keyQueries) == 0 || keyQueries[0] != "key in (P-3, P-4)" {
+		t.Errorf("key queries = %q, want drift query key in (P-3, P-4) first", keyQueries)
 	}
-	if len(issues) != 1 || issues[0].Identifier != "P-3" {
+	if len(issues) == 0 || issues[0].Identifier != "P-3" {
 		t.Errorf("issues = %v", issues)
 	}
 }
