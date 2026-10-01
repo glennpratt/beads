@@ -1159,6 +1159,17 @@ func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]
 // PreviousExternalRef returns the external_ref value recorded for issueID
 // as of the most recent commit at or before asOf.
 // Implements storage.ExternalRefHistoryQuerier.
+// ExternalRefsAsOf implements storage.ExternalRefsAsOfQuerier.
+func (s *EmbeddedDoltStore) ExternalRefsAsOf(ctx context.Context, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		refs, err = issueops.ExternalRefsAsOfInTx(ctx, tx, asOf)
+		return err
+	})
+	return refs, err
+}
+
 func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
 	var ref string
 	var found bool

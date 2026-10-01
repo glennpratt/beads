@@ -18,6 +18,11 @@ func TestTrackerMetadataCurrent(t *testing.T) {
 		{"missing key", `{"note":"mine"}`, map[string]interface{}{"labels": []string{}}, false},
 		{"no local metadata", ``, map[string]interface{}{"labels": []string{}}, false},
 		{"local not an object", `[1]`, map[string]interface{}{"labels": []string{}}, false},
+		{"struct vs stored map, different key order", `{"b":{"z":1,"a":"x"}}`, map[string]interface{}{"b": struct {
+			Z int    `json:"z"`
+			A string `json:"a"`
+		}{1, "x"}}, true},
+		{"explicit null matches missing", `{"other":1}`, map[string]interface{}{"gone": nil}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

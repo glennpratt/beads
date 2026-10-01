@@ -92,6 +92,20 @@ func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asO
 	return ref, found, err
 }
 
+// ExternalRefsAsOf implements storage.ExternalRefsAsOfQuerier.
+func (s *DoltStore) ExternalRefsAsOf(ctx context.Context, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		refs, err = issueops.ExternalRefsAsOfInTx(ctx, tx, asOf)
+		if err != nil {
+			return wrapQueryError("get external refs as of", err)
+		}
+		return nil
+	})
+	return refs, err
+}
+
 // ChangedIssueIDs returns the set of issue IDs whose data differs between
 // fromCommit and toCommit, derived from dolt_diff over the issues, labels,
 // dependencies, and comments tables. An issue is reported under Removed

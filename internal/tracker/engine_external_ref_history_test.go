@@ -195,18 +195,31 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 }
 
 func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
-	// No history entry at or before lastSync: treat as changed, per the
-	// documented contract on storage.ExternalRefHistoryQuerier.PreviousExternalRef.
+	// No committed history entry at or before lastSync: decide by the issue's
+	// own timestamps. A pull's imports are committed when the command ends,
+	// possibly after the recorded last_sync, so a missing entry alone does
+	// not mean the issue was linked after the sync.
+	lastSync := time.Now()
 	querier := &historyQuerierStore{prevFound: false}
 	e := &Engine{Store: querier}
-	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !changed {
-		t.Error("expected changed=true when no prior history entry is found")
+	for _, tt := range []struct {
+		name             string
+		created, updated time.Time
+		want             bool
+	}{
+		{"created after last sync", lastSync.Add(time.Minute), lastSync.Add(time.Minute), true},
+		{"updated after last sync", lastSync.Add(-time.Hour), lastSync.Add(time.Minute), true},
+		{"imported before last sync, commit landed later", lastSync.Add(-time.Minute), lastSync.Add(-time.Minute), false},
+	} {
+		local := newTestIssue("bd-1", tt.created, tt.updated)
+		changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tt.name, err)
+		}
+		if changed != tt.want {
+			t.Errorf("%s: changed = %v, want %v", tt.name, changed, tt.want)
+		}
 	}
 }
 

@@ -129,3 +129,51 @@ func PreviousExternalRefInTx(ctx context.Context, tx *sql.Tx, issueID string, as
 	}
 	return previousRef.String, true, nil
 }
+
+// ExternalRefsAsOfInTx returns every issue's external_ref as of the most
+// recent commit at or before asOf ("" for NULL). Issues missing from the map
+// did not exist at that commit. Equivalent to PreviousExternalRefInTx for all
+// issues, in two queries instead of one history scan per issue.
+func ExternalRefsAsOfInTx(ctx context.Context, tx *sql.Tx, asOf time.Time) (map[string]string, error) {
+	refs := make(map[string]string)
+	var hash string
+	err := tx.QueryRowContext(ctx, `SELECT commit_hash FROM dolt_log WHERE date <= ? ORDER BY date DESC LIMIT 1`, asOf.UTC()).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return refs, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to find commit as of %s: %w", asOf.UTC().Format(time.RFC3339), err)
+	}
+	if !isDoltCommitHash(hash) {
+		return nil, fmt.Errorf("unexpected commit hash %q", hash)
+	}
+	// AS OF takes a literal; the hash is validated above.
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT id, external_ref FROM issues AS OF '%s'", hash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read external refs as of %s: %w", hash, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var ref sql.NullString
+		if err := rows.Scan(&id, &ref); err != nil {
+			return nil, fmt.Errorf("failed to scan external ref: %w", err)
+		}
+		refs[id] = ref.String
+	}
+	return refs, rows.Err()
+}
+
+// isDoltCommitHash reports whether s looks like a Dolt commit hash (32
+// base32 characters, 0-9 and a-v).
+func isDoltCommitHash(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'v')) {
+			return false
+		}
+	}
+	return true
+}

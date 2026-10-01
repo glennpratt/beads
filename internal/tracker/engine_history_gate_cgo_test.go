@@ -172,3 +172,79 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		t.Fatal("expected changed=true via the (behaviorally unchanged) Dolt server fast path")
 	}
 }
+
+// TestEmbeddedDoltExternalRefsAsOfMatchesPerIssueHistory checks the batch
+// query used by pulls against the per-issue history path.
+func TestEmbeddedDoltExternalRefsAsOfMatchesPerIssueHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := embeddeddolt.Open(ctx, filepath.Join(t.TempDir(), ".beads"), "refsasof", "main")
+	if err != nil {
+		t.Fatalf("Open embedded store: %v", err)
+	}
+	defer store.Close()
+	if err := store.SetConfig(ctx, "issue_prefix", "ra"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit(ctx, "bd init"); err != nil {
+		t.Fatal(err)
+	}
+	beforeIssues := time.Now().UTC()
+	time.Sleep(1200 * time.Millisecond)
+
+	for _, id := range []string{"ra-1", "ra-2"} {
+		if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.UpdateIssue(ctx, "ra-1", map[string]interface{}{"external_ref": "old-ref"}, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit(ctx, "create"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	asOf := time.Now().UTC()
+	time.Sleep(1200 * time.Millisecond)
+	if err := store.UpdateIssue(ctx, "ra-1", map[string]interface{}{"external_ref": "new-ref"}, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit(ctx, "relink"); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := store.ExternalRefsAsOf(ctx, asOf)
+	if err != nil {
+		t.Fatalf("ExternalRefsAsOf: %v", err)
+	}
+	if refs["ra-1"] != "old-ref" {
+		t.Errorf("ra-1 as of asOf = %q, want old-ref", refs["ra-1"])
+	}
+	if ref, ok := refs["ra-2"]; !ok || ref != "" {
+		t.Errorf("ra-2 as of asOf = (%q, %v), want (\"\", true)", ref, ok)
+	}
+	for _, id := range []string{"ra-1", "ra-2"} {
+		prev, found, err := store.PreviousExternalRef(ctx, id, asOf)
+		if err != nil || !found || prev != refs[id] {
+			t.Errorf("%s: per-issue (%q, %v, %v) disagrees with batch %q", id, prev, found, err, refs[id])
+		}
+	}
+
+	early, err := store.ExternalRefsAsOf(ctx, beforeIssues)
+	if err != nil {
+		t.Fatalf("ExternalRefsAsOf(before issues): %v", err)
+	}
+	if _, ok := early["ra-1"]; ok {
+		t.Errorf("issues created after the cutoff should be absent, got %v", early)
+	}
+
+	if _, ok := externalRefsAsOfQuerier(store); !ok {
+		t.Fatal("EmbeddedDoltStore should satisfy ExternalRefsAsOfQuerier")
+	}
+	local := &types.Issue{ID: "ra-1", CreatedAt: asOf.Add(-time.Hour), UpdatedAt: asOf.Add(-time.Hour)}
+	if !refChangedSince(local, "new-ref", refs, asOf) {
+		t.Error("relinked issue should be reported changed")
+	}
+	if refChangedSince(local, "old-ref", refs, asOf) {
+		t.Error("unchanged ref should not be reported changed")
+	}
+}

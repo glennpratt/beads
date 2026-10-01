@@ -39,3 +39,12 @@ type ExternalRefHistoryQuerier interface {
 	// column was NULL.
 	PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (ref string, found bool, err error)
 }
+
+// ExternalRefsAsOfQuerier answers PreviousExternalRef for every issue at
+// once: the external_ref of each issue as of the most recent commit at or
+// before asOf. Issues absent from the map did not exist at that commit
+// (found=false in PreviousExternalRef terms). Tracker pulls use it to avoid
+// one history query per local issue.
+type ExternalRefsAsOfQuerier interface {
+	ExternalRefsAsOf(ctx context.Context, asOf time.Time) (map[string]string, error)
+}
