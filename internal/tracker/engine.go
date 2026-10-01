@@ -348,7 +348,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	fetchOpts := FetchOptions{State: opts.State}
 	var lastSync *time.Time
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
-	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" {
+	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" && !opts.Full {
 		if t, err := parseSyncTime(lastSyncStr); err == nil {
 			fetchOpts.Since = &t
 			lastSync = &t
