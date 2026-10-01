@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -68,6 +69,69 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+
+	// held, when set, is an engine kept open by HoldConnection and reused by
+	// every transaction instead of opening one per call.
+	heldMu   sync.Mutex
+	held     *heldDB
+	heldRefs int
+}
+
+type heldDB struct {
+	db      *sql.DB
+	cleanup func() error
+}
+
+// HoldConnection keeps one embedded engine open, so transactions reuse it
+// instead of opening and closing an engine per call (the dominant cost of
+// commands that issue thousands of small operations, such as tracker syncs).
+// While held, other processes wait for the database as they would for any
+// long write. The returned release closes the engine after its last holder.
+// Holding is a no-op for non-default branches, whose per-connection head ref
+// a pooled second connection would not inherit.
+func (s *EmbeddedDoltStore) HoldConnection(ctx context.Context) (func() error, error) {
+	if s.closed.Load() {
+		return nil, errClosed
+	}
+	if b := strings.TrimSpace(s.branch); b != "" && b != "main" {
+		return func() error { return nil }, nil
+	}
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+	if s.held == nil {
+		db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+		if err != nil {
+			return nil, err
+		}
+		s.held = &heldDB{db: db, cleanup: cleanup}
+	}
+	s.heldRefs++
+	var once sync.Once
+	return func() error {
+		var err error
+		once.Do(func() {
+			s.heldMu.Lock()
+			defer s.heldMu.Unlock()
+			s.heldRefs--
+			if s.heldRefs == 0 && s.held != nil {
+				err = s.held.cleanup()
+				s.held = nil
+			}
+		})
+		return err
+	}, nil
+}
+
+// openTxDB returns the held engine if any (with a no-op cleanup), else a
+// freshly opened one.
+func (s *EmbeddedDoltStore) openTxDB(ctx context.Context) (*sql.DB, func() error, error) {
+	s.heldMu.Lock()
+	held := s.held
+	s.heldMu.Unlock()
+	if held != nil {
+		return held.db, func() error { return nil }, nil
+	}
+	return OpenSQL(ctx, s.dataDir, s.database, s.branch)
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the
@@ -441,7 +505,7 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = s.openTxDB(ctx)
 	if err != nil {
 		return
 	}
@@ -517,7 +581,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	if s.readOnly {
 		return 0, ErrReadOnly
 	}
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err := s.openTxDB(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("embeddeddolt: open db: %w", err)
 	}

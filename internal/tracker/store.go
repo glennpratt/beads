@@ -26,6 +26,12 @@ type Store interface {
 	AddDependency(context.Context, *types.Dependency, string) error
 }
 
+// ConnectionHolder is the optional capability to keep the underlying
+// database open across many operations (see EmbeddedDoltStore.HoldConnection).
+type ConnectionHolder interface {
+	HoldConnection(ctx context.Context) (func() error, error)
+}
+
 // DependencyRemover is the optional capability to remove a dependency, used
 // when a tracker reports that a relationship it owns no longer exists.
 type DependencyRemover interface {

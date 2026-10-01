@@ -142,6 +142,7 @@ go_test(
         "graph_counter_contract_test.go",
         "history_presence_contract_test.go",
         "history_test.go",
+        "hold_connection_internal_test.go",
         "is_blocked_batch_test.go",
         "issue_lifecycle_test.go",
         "issue_operations_behavior_test.go",
