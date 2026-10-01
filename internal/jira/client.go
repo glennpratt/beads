@@ -152,9 +152,19 @@ type ResolutionField struct {
 
 // Transition represents a Jira workflow transition.
 type Transition struct {
-	ID   string      `json:"id"`
-	Name string      `json:"name"`
-	To   StatusField `json:"to"`
+	ID     string                     `json:"id"`
+	Name   string                     `json:"name"`
+	To     StatusField                `json:"to"`
+	Fields map[string]TransitionField `json:"fields,omitempty"` // screen fields (expand=transitions.fields)
+}
+
+// TransitionField is a field on a transition screen.
+type TransitionField struct {
+	Required      bool `json:"required"`
+	AllowedValues []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"allowedValues"`
 }
 
 // TransitionsResult is the response from GET /issue/{key}/transitions.
@@ -508,7 +518,7 @@ func (c *Client) UpdateIssue(ctx context.Context, key string, fields map[string]
 
 // GetIssueTransitions fetches the available workflow transitions for a Jira issue.
 func (c *Client) GetIssueTransitions(ctx context.Context, key string) ([]Transition, error) {
-	apiURL := fmt.Sprintf("%s/issue/%s/transitions", c.apiBase(), url.PathEscape(key))
+	apiURL := fmt.Sprintf("%s/issue/%s/transitions?expand=transitions.fields", c.apiBase(), url.PathEscape(key))
 
 	body, err := c.doRequest(ctx, "GET", apiURL, nil)
 	if err != nil {
@@ -525,8 +535,17 @@ func (c *Client) GetIssueTransitions(ctx context.Context, key string) ([]Transit
 
 // TransitionIssue moves a Jira issue to a new status using the given transition ID.
 func (c *Client) TransitionIssue(ctx context.Context, key, transitionID string) error {
+	return c.TransitionIssueWithFields(ctx, key, transitionID, nil)
+}
+
+// TransitionIssueWithFields applies a transition, setting screen fields such
+// as a required resolution.
+func (c *Client) TransitionIssueWithFields(ctx context.Context, key, transitionID string, fields map[string]interface{}) error {
 	payload := map[string]interface{}{
 		"transition": map[string]string{"id": transitionID},
+	}
+	if len(fields) > 0 {
+		payload["fields"] = fields
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

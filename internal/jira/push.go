@@ -180,6 +180,44 @@ func (t *Tracker) DescribeCreate(ctx context.Context, issue *types.Issue) string
 	return strings.Join(parts, "; ")
 }
 
+// preferredResolutions are tried, in order, when a transition requires a
+// resolution and jira.resolution is unset or not allowed.
+var preferredResolutions = []string{"Done", "Fixed", "Complete", "Resolved"}
+
+// transitionFields returns screen fields a transition requires. Currently
+// this is the resolution (jira.resolution if allowed, else a preferred or the
+// first allowed value), which some workflows require to close an issue.
+func (t *Tracker) transitionFields(ctx context.Context, tr Transition) map[string]interface{} {
+	res, ok := tr.Fields["resolution"]
+	if !ok || !res.Required || len(res.AllowedValues) == 0 {
+		return nil
+	}
+	allowed := func(name string) (string, bool) {
+		for _, v := range res.AllowedValues {
+			if strings.EqualFold(v.Name, strings.TrimSpace(name)) {
+				return v.Name, true
+			}
+		}
+		return "", false
+	}
+	choice := res.AllowedValues[0].Name
+	configured := ""
+	if t.store != nil {
+		configured, _ = t.getConfig(ctx, "jira.resolution", "JIRA_RESOLUTION")
+	}
+	if name, ok := allowed(configured); ok && configured != "" {
+		choice = name
+	} else {
+		for _, p := range preferredResolutions {
+			if name, ok := allowed(p); ok {
+				choice = name
+				break
+			}
+		}
+	}
+	return map[string]interface{}{"resolution": map[string]string{"name": choice}}
+}
+
 // jiraLabels returns labels to send to Jira, without the push marker or
 // jira.local_labels matches.
 func (m *jiraFieldMapper) jiraLabels(labels []string) []string {

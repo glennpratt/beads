@@ -300,3 +300,30 @@ func TestDescribeCreate(t *testing.T) {
 		t.Errorf("DescribeCreate = %q, want %q", got, want)
 	}
 }
+
+func TestTransitionFieldsResolution(t *testing.T) {
+	var tr Transition
+	raw := `{"id":"291","name":"Close","to":{"name":"Closed"},"fields":{"resolution":{"required":true,"allowedValues":[{"id":"1","name":"Won't Complete"},{"id":"2","name":"Complete"},{"id":"3","name":"Duplicate"}]}}}`
+	if err := json.Unmarshal([]byte(raw), &tr); err != nil {
+		t.Fatal(err)
+	}
+	res := func(cfg map[string]string) interface{} {
+		trk := &Tracker{store: &configStore{data: cfg}}
+		return trk.transitionFields(context.Background(), tr)["resolution"]
+	}
+	if got := res(nil); !reflect.DeepEqual(got, map[string]string{"name": "Complete"}) {
+		t.Errorf("default resolution = %v, want preferred Complete", got)
+	}
+	if got := res(map[string]string{"jira.resolution": "duplicate"}); !reflect.DeepEqual(got, map[string]string{"name": "Duplicate"}) {
+		t.Errorf("configured resolution = %v, want Duplicate", got)
+	}
+	if got := res(map[string]string{"jira.resolution": "Nope"}); !reflect.DeepEqual(got, map[string]string{"name": "Complete"}) {
+		t.Errorf("disallowed configured resolution = %v, want fallback Complete", got)
+	}
+
+	var optional Transition
+	_ = json.Unmarshal([]byte(`{"id":"411","name":"Cancel","to":{"name":"Cancelled"}}`), &optional)
+	if f := (&Tracker{}).transitionFields(context.Background(), optional); f != nil {
+		t.Errorf("no resolution field should send no fields, got %v", f)
+	}
+}

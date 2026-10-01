@@ -413,7 +413,9 @@ func (t *Tracker) applyTransition(ctx context.Context, key string, status types.
 
 	for _, tr := range transitions {
 		if strings.EqualFold(tr.To.Name, desiredName) {
-			return t.client.TransitionIssue(ctx, key, tr.ID)
+			fields := t.transitionFields(ctx, tr)
+			debug.Logf("jira: transition %s via %q to %q fields=%v\n", key, tr.Name, tr.To.Name, fields)
+			return t.client.TransitionIssueWithFields(ctx, key, tr.ID, fields)
 		}
 	}
 
