@@ -43,6 +43,7 @@ type IssueFields struct {
 	Updated     string           `json:"updated"`
 	Resolution  *ResolutionField `json:"resolution"`
 	Parent      *ParentField     `json:"parent,omitempty"` // sub-task parent; on Jira Cloud also the epic
+	IssueLinks  []IssueLink      `json:"issuelinks,omitempty"`
 
 	// Custom holds raw "customfield_*" values (e.g. Epic Link, Parent Link),
 	// keyed by field ID. Populated on unmarshal only.
@@ -325,7 +326,7 @@ func (c *Client) FetchIssueTimestamp(ctx context.Context, jiraKey string) (time.
 }
 
 // searchFields is the default set of fields to request in search/get queries.
-const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution,parent"
+const searchFields = "summary,description,status,priority,issuetype,project,assignee,labels,created,updated,resolution,parent,issuelinks"
 
 // requestFields returns searchFields plus any configured ExtraFields.
 func (c *Client) requestFields() string {

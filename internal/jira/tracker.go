@@ -64,6 +64,9 @@ type Tracker struct {
 	boardMembers   map[string]map[string]boardEntry // issue key -> board name -> entry
 	membersLoaded  bool
 	membersErr     error
+
+	// linkMap overrides link type kinds (jira.link_map.<type>; see links.go).
+	linkMap map[string]string
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -173,6 +176,12 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 		}
 
 		t.loadScopeConfig(allConfig)
+		t.linkMap = make(map[string]string)
+		for key, val := range allConfig {
+			if strings.HasPrefix(key, "jira.link_map.") && strings.TrimSpace(val) != "" {
+				t.linkMap[strings.ToLower(strings.TrimPrefix(key, "jira.link_map."))] = strings.ToLower(strings.TrimSpace(val))
+			}
+		}
 
 		const customFieldPrefix = "jira.custom_fields."
 		customFields := make(map[string]interface{})
@@ -294,24 +303,56 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 	}
 	debug.Logf("jira: search returned %d issues\n", len(issues))
 
+	fetched := make(map[string]bool, len(issues))
+	addIssues := func(extra []Issue) {
+		for _, i := range extra {
+			if k := strings.ToUpper(i.Key); !fetched[k] {
+				fetched[k] = true
+				issues = append(issues, i)
+			}
+		}
+	}
+	all := issues
+	issues = nil
+	addIssues(all)
+
 	// Board membership changes (rank, column, aging out of a board filter)
 	// need not bump an issue's updated time; fetch drifted issues too.
 	if len(t.boards) > 0 {
 		if err := t.loadBoardMembership(ctx); err != nil {
 			return nil, err
 		}
-		fetched := make(map[string]bool, len(issues))
-		for _, i := range issues {
-			fetched[strings.ToUpper(i.Key)] = true
-		}
 		if drift := t.boardDriftKeys(ctx, fetched); len(drift) > 0 {
 			debug.Logf("jira: board membership changed for %d issues; fetching them\n", len(drift))
-			extra, err := t.searchKeys(ctx, drift)
+			extra, err := t.searchKeysWhere(ctx, drift, "")
 			if err != nil {
 				return nil, err
 			}
-			issues = append(issues, extra...)
+			addIssues(extra)
 		}
+	}
+
+	local, err := t.localJiraKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Issues outside every scope (pulled via a link, or that left a scope)
+	// only refresh here.
+	if opts.Since != nil {
+		extra, err := t.refreshTrackedKeys(ctx, *opts.Since, local, fetched)
+		if err != nil {
+			return nil, err
+		}
+		addIssues(extra)
+	}
+	// Follow links one hop to issues not yet pulled.
+	if follow := t.linkedKeysToFollow(ctx, issues, fetched, local); len(follow) > 0 {
+		debug.Logf("jira: following links to %d issues outside the pull scope\n", len(follow))
+		extra, err := t.searchKeysWhere(ctx, follow, "")
+		if err != nil {
+			return nil, err
+		}
+		addIssues(extra)
 	}
 
 	result := make([]tracker.TrackerIssue, 0, len(issues))
@@ -463,6 +504,7 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 		parentLinkField:  t.parentLinkField,
 		pushLabel:        t.pushLabel,
 		localLabels:      t.localLabels,
+		linkMap:          t.linkMap,
 	}
 }
 
