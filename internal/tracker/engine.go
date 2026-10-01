@@ -1025,6 +1025,10 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		issues = filtered
 	}
 
+	// Create parents before their children so a child's create can link to
+	// the parent's new external issue (e.g. a Jira story's Epic Link).
+	issues = e.orderCreatesParentFirst(ctx, issues)
+
 	// Build descendant set if --parent was specified.
 	var descendantSet map[string]bool
 	if opts.ParentID != "" {
@@ -1258,6 +1262,64 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		attribute.Int("sync.errors", stats.Errors),
 	)
 	return stats, nil
+}
+
+// orderCreatesParentFirst stably reorders issues so that, among issues that
+// will be created (no external ref for this tracker and accepted by the
+// ShouldPush hook), every parent-child parent comes before its children.
+// Other issues keep their positions relative to each other.
+func (e *Engine) orderCreatesParentFirst(ctx context.Context, issues []*types.Issue) []*types.Issue {
+	candidates := make(map[string]*types.Issue)
+	for _, issue := range issues {
+		ref := strings.TrimSpace(derefStr(issue.ExternalRef))
+		if ref != "" && e.Tracker.IsExternalRef(ref) {
+			continue
+		}
+		if e.PushHooks != nil && e.PushHooks.ShouldPush != nil && !e.PushHooks.ShouldPush(issue) {
+			continue
+		}
+		candidates[issue.ID] = issue
+	}
+	if len(candidates) < 2 {
+		return issues
+	}
+
+	parents := make(map[string][]string, len(candidates))
+	for id := range candidates {
+		deps, err := e.Store.GetDependenciesWithMetadata(ctx, id)
+		if err != nil {
+			continue
+		}
+		for _, d := range deps {
+			if d != nil && d.DependencyType == types.DepParentChild && candidates[d.ID] != nil {
+				parents[id] = append(parents[id], d.ID)
+			}
+		}
+	}
+
+	ordered := make([]*types.Issue, 0, len(issues))
+	placed := make(map[string]bool, len(candidates))
+	var place func(id string, depth int)
+	place = func(id string, depth int) {
+		if placed[id] || depth > len(candidates) { // depth guard: cycles
+			return
+		}
+		placed[id] = true
+		for _, p := range parents[id] {
+			place(p, depth+1)
+		}
+		ordered = append(ordered, candidates[id])
+	}
+	// Reinsert placed parents ahead of the child; ordering among candidates
+	// follows first appearance otherwise.
+	for _, issue := range issues {
+		if candidates[issue.ID] == nil {
+			ordered = append(ordered, issue)
+			continue
+		}
+		place(issue.ID, 0)
+	}
+	return ordered
 }
 
 func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions, descendantSet, skipIDs, forceIDs map[string]bool) ([]*types.Issue, int) {

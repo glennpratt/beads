@@ -458,6 +458,10 @@ var createCmd = &cobra.Command{
 			noInheritLabels, _ := cmd.Flags().GetBool("no-inherit-labels")
 			if !noInheritLabels {
 				inheritedLabels, _ = parentLookupStore.GetLabels(ctx, parentID)
+				// The Jira push marker must be applied deliberately; a child of
+				// a Jira-bound bead is not itself bound for Jira.
+				pushLabel, _ := parentLookupStore.GetConfig(ctx, "jira.push_label")
+				inheritedLabels = withoutLabel(inheritedLabels, pushLabel)
 			}
 		}
 
@@ -815,6 +819,21 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		DeferUntil:         params.DeferUntil,
 		Metadata:           params.Metadata,
 	}
+}
+
+// withoutLabel drops label (case-insensitive) from labels; "" is a no-op.
+func withoutLabel(labels []string, label string) []string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return labels
+	}
+	out := make([]string, 0, len(labels))
+	for _, l := range labels {
+		if !strings.EqualFold(strings.TrimSpace(l), label) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func mergeCreateLabels(labels, inheritedLabels []string) []string {

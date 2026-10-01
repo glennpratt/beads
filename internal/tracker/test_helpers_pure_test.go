@@ -226,6 +226,7 @@ type pureTestStore struct {
 	storage.IssueLifecycleStore
 	issues        []*types.Issue
 	localMetadata map[string]string
+	deps          map[string][]*types.IssueWithDependencyMetadata // issue ID -> its dependencies
 }
 
 func newPureTestStore(issues ...*types.Issue) *pureTestStore {
@@ -252,6 +253,11 @@ func (s *pureTestStore) UpdateIssue(_ context.Context, id string, updates map[st
 		return nil
 	}
 	return storage.ErrNotFound
+}
+
+// GetDependenciesWithMetadata returns dependencies registered in deps.
+func (s *pureTestStore) GetDependenciesWithMetadata(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, error) {
+	return s.deps[id], nil
 }
 
 func (s *pureTestStore) GetLocalMetadata(_ context.Context, key string) (string, error) {
