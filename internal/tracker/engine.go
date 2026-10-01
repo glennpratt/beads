@@ -94,6 +94,15 @@ type PushHooks struct {
 	// external_ref identifies the target.
 	TargetScope func() string
 
+	// DescribeChanges names what pushing local would change on remote
+	// (e.g. "summary, priority"); "" means nothing. When set, dry-run
+	// previews fetch linked issues and report only real updates.
+	DescribeChanges func(local *types.Issue, remote *TrackerIssue) string
+
+	// DescribeCreate summarizes what creating issue would send (type, parent
+	// placement, labels). Used only to enrich dry-run previews.
+	DescribeCreate func(ctx context.Context, issue *types.Issue) string
+
 	// ShouldPush filters issues during push. Return false to skip.
 	// Called in addition to type/state/ephemeral filters. Use for prefix filtering, etc.
 	// If nil, all issues (matching other filters) are pushed.
@@ -878,6 +887,28 @@ func parseSyncTime(value string) (time.Time, error) {
 // "github.pushhash.bd-123"). local_metadata is dolt-ignored, so these hashes
 // are clone-local and reset on clone/branch-checkout/server-restart; that only
 // costs one fetch+ContentEqual pass to repopulate, never a missed update.
+// previewUpdateChanges fetches a linked issue for a dry-run preview and asks
+// DescribeChanges what an update would change. known is false when the hook
+// is unset, the issue is forced, or the fetch fails, in which case the
+// preview falls back to reporting an update.
+func (e *Engine) previewUpdateChanges(ctx context.Context, issue *types.Issue, extRef string, forced bool) (changes string, known bool) {
+	if forced || e.PushHooks == nil || e.PushHooks.DescribeChanges == nil {
+		return "", false
+	}
+	extID := e.Tracker.ExtractIdentifier(extRef)
+	if extID == "" {
+		return "", false
+	}
+	remote, err := e.Tracker.FetchIssue(ctx, extID)
+	if err != nil || remote == nil {
+		if err != nil {
+			e.warn("Failed to fetch %s for preview: %v", extID, err)
+		}
+		return "", false
+	}
+	return e.PushHooks.DescribeChanges(issue, remote), true
+}
+
 func (e *Engine) pushHashKey(issueID string) string {
 	return e.Tracker.ConfigPrefix() + ".pushhash." + issueID
 }
@@ -1066,7 +1097,13 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 
 		if opts.DryRun {
 			if willCreate {
-				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
+				detail := ""
+				if e.PushHooks != nil && e.PushHooks.DescribeCreate != nil {
+					if d := e.PushHooks.DescribeCreate(ctx, issue); d != "" {
+						detail = " (" + d + ")"
+					}
+				}
+				e.msg("[dry-run] Would create in %s: %s%s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title), detail)
 				stats.Created++
 			} else if opts.CreateOnly && !forceIDs[issue.ID] {
 				// A real --create-only run leaves linked issues alone, so the
@@ -1076,8 +1113,15 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				// Content unchanged since last push: a real run would skip this
 				// issue, so the preview must say so too (gastownhall/beads#4214).
 				stats.Skipped++
+			} else if changes, known := e.previewUpdateChanges(ctx, issue, extRef, forceIDs[issue.ID]); known && changes == "" {
+				// Remote already matches: a real run would skip this issue.
+				stats.Skipped++
 			} else {
-				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
+				if changes != "" {
+					e.msg("[dry-run] Would update in %s: %s (%s)", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title), changes)
+				} else {
+					e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
+				}
 				stats.Updated++
 			}
 			continue

@@ -160,7 +160,7 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
-	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
+	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore, jt, nil)
 
 	opts := tracker.SyncOptions{
 		Pull:       pull,
@@ -220,28 +220,74 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// buildJiraPushHooks creates PushHooks for Jira-specific push behavior.
-func buildJiraPushHooks(ctx context.Context) *tracker.PushHooks {
-	return buildJiraPushHooksForStore(ctx, tracker.NewStore(store))
-}
-
-func buildJiraPushHooksForStore(ctx context.Context, st tracker.Store) *tracker.PushHooks {
+// buildJiraPushHooksForStore filters pushes and skips no-op updates.
+//
+// ShouldPush applies jira.push_prefix, and when jira.push_label is set, only
+// creates unlinked beads that carry the label or were named explicitly
+// (explicitIDs, e.g. `bd jira push <id>`). Beads already linked to Jira stay
+// eligible for updates.
+//
+// ContentEqual compares the fields a push would send, so issues pulled from
+// Jira and not edited locally are not rewritten.
+func buildJiraPushHooksForStore(ctx context.Context, st tracker.Store, jt *jira.Tracker, explicitIDs []string) *tracker.PushHooks {
+	explicit := make(map[string]bool, len(explicitIDs))
+	for _, id := range explicitIDs {
+		explicit[strings.TrimSpace(id)] = true
+	}
 	return &tracker.PushHooks{
 		ShouldPush: func(issue *types.Issue) bool {
-			pushPrefix, _ := st.GetConfig(ctx, "jira.push_prefix")
-			if pushPrefix == "" {
+			if !matchesJiraPushPrefix(ctx, st, issue) {
+				return false
+			}
+			if jt == nil || jt.PushLabel() == "" || explicit[issue.ID] {
 				return true
 			}
-			for _, prefix := range strings.Split(pushPrefix, ",") {
-				prefix = strings.TrimSpace(prefix)
-				prefix = strings.TrimSuffix(prefix, "-")
-				if prefix != "" && strings.HasPrefix(issue.ID, prefix+"-") {
-					return true
-				}
+			if ref := strings.TrimSpace(derefJiraRef(issue.ExternalRef)); ref != "" && jt.IsExternalRef(ref) {
+				return true
 			}
-			return false
+			return jt.HasPushLabel(issue)
+		},
+		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
+			if jt == nil {
+				return false
+			}
+			return len(jt.PushFieldDiff(local, remote)) == 0
+		},
+		DescribeCreate: func(ctx context.Context, issue *types.Issue) string {
+			if jt == nil {
+				return ""
+			}
+			return jt.DescribeCreate(ctx, issue)
+		},
+		DescribeChanges: func(local *types.Issue, remote *tracker.TrackerIssue) string {
+			if jt == nil {
+				return ""
+			}
+			return strings.Join(jt.PushFieldDiff(local, remote), ", ")
 		},
 	}
+}
+
+func matchesJiraPushPrefix(ctx context.Context, st tracker.Store, issue *types.Issue) bool {
+	pushPrefix, _ := st.GetConfig(ctx, "jira.push_prefix")
+	if pushPrefix == "" {
+		return true
+	}
+	for _, prefix := range strings.Split(pushPrefix, ",") {
+		prefix = strings.TrimSpace(prefix)
+		prefix = strings.TrimSuffix(prefix, "-")
+		if prefix != "" && strings.HasPrefix(issue.ID, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+func derefJiraRef(ref *string) string {
+	if ref == nil {
+		return ""
+	}
+	return *ref
 }
 
 func runJiraStatus(cmd *cobra.Command, args []string) error {

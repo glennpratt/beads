@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "client.go",
         "fieldmapper.go",
+        "push.go",
         "refs.go",
         "tracker.go",
         "types.go",
@@ -25,6 +26,7 @@ go_test(
         "client_test.go",
         "client_tls_test.go",
         "hierarchy_test.go",
+        "push_test.go",
         "refs_test.go",
         "retry_test.go",
         "tracker_test.go",

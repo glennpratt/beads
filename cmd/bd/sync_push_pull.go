@@ -372,7 +372,7 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 	engine := tracker.NewEngine(jt, trackerStore, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
+	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore, jt, args)
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Push:     true,

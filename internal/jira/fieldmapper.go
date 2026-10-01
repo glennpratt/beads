@@ -18,6 +18,7 @@ type jiraFieldMapper struct {
 	typeCustomFields map[string]map[string]interface{} // Jira issue type → field name/id → value
 	epicLinkField    string                            // Epic Link custom field ID (Server/DC), "" if unavailable
 	parentLinkField  string                            // Parent Link custom field ID (Advanced Roadmaps), "" if unavailable
+	pushLabel        string                            // jira.push_label marker; never sent to Jira
 }
 
 func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
@@ -279,9 +280,9 @@ func (m *jiraFieldMapper) IssueToTracker(issue *types.Issue) map[string]interfac
 		fields["priority"] = map[string]string{"name": name}
 	}
 
-	// Set labels
-	if len(issue.Labels) > 0 {
-		fields["labels"] = issue.Labels
+	// Set labels, minus the local push marker.
+	if labels := m.jiraLabels(issue.Labels); len(labels) > 0 {
+		fields["labels"] = labels
 	}
 
 	for fieldName, value := range m.customFields {

@@ -38,8 +38,13 @@ type Tracker struct {
 	// Hierarchy link custom fields (Jira Server/DC). Resolved lazily on the
 	// first fetch from config or by discovery; empty means not available.
 	epicLinkField     string
+	epicNameField     string
 	parentLinkField   string
 	hierarchyResolved bool
+
+	// pushLabel (jira.push_label) marks unlinked beads that may be created in
+	// Jira. It is stripped from the labels sent to Jira.
+	pushLabel string
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -99,6 +104,9 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	if err := t.client.ConfigureTLS(clientCert, clientKey, caCert); err != nil {
 		return err
 	}
+
+	pushLabel, _ := t.getConfig(ctx, "jira.push_label", "JIRA_PUSH_LABEL")
+	t.pushLabel = strings.TrimSpace(pushLabel)
 
 	apiVersion, _ := t.getConfig(ctx, "jira.api_version", "JIRA_API_VERSION")
 	if apiVersion == "" {
@@ -206,21 +214,22 @@ func (t *Tracker) resolveHierarchyFields(ctx context.Context) {
 	t.hierarchyResolved = true
 
 	epicLink, _ := t.getConfig(ctx, "jira.epic_link_field", "JIRA_EPIC_LINK_FIELD")
+	epicName, _ := t.getConfig(ctx, "jira.epic_name_field", "JIRA_EPIC_NAME_FIELD")
 	parentLink, _ := t.getConfig(ctx, "jira.parent_link_field", "JIRA_PARENT_LINK_FIELD")
-	if epicLink == "" && parentLink == "" {
-		discEpic, discParent, err := t.client.DiscoverHierarchyFields(ctx)
+	if epicLink == "" && epicName == "" && parentLink == "" {
+		hf, err := t.client.DiscoverHierarchyFields(ctx)
 		if err != nil {
 			debug.Logf("jira: hierarchy field discovery failed, using parent field only: %v\n", err)
 		}
-		epicLink, parentLink = discEpic, discParent
+		epicLink, epicName, parentLink = hf.EpicLink, hf.EpicName, hf.ParentLink
 	}
-	for _, f := range []*string{&epicLink, &parentLink} {
+	for _, f := range []*string{&epicLink, &epicName, &parentLink} {
 		if strings.EqualFold(strings.TrimSpace(*f), "none") {
 			*f = ""
 		}
 	}
-	t.epicLinkField, t.parentLinkField = epicLink, parentLink
-	debug.Logf("jira: hierarchy fields: epic_link=%q parent_link=%q\n", epicLink, parentLink)
+	t.epicLinkField, t.epicNameField, t.parentLinkField = epicLink, epicName, parentLink
+	debug.Logf("jira: hierarchy fields: epic_link=%q epic_name=%q parent_link=%q\n", epicLink, epicName, parentLink)
 
 	var extra []string
 	for _, f := range []string{epicLink, parentLink} {
@@ -307,11 +316,15 @@ func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.T
 }
 
 func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker.TrackerIssue, error) {
+	t.resolveHierarchyFields(ctx)
 	mapper := t.FieldMapper()
 	fields := mapper.IssueToTracker(issue)
 
 	// Set project to primary (first) project key.
 	fields["project"] = map[string]string{"key": t.PrimaryProjectKey()}
+
+	warnings := t.applyCreateHierarchy(ctx, issue, fields)
+	debug.Logf("jira: create %s fields: %s\n", issue.ID, strings.Join(sortedKeys(fields), ","))
 
 	created, err := t.client.CreateIssue(ctx, fields)
 	if err != nil {
@@ -319,41 +332,60 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	}
 
 	ti := jiraToTrackerIssue(created, t.priorityMap)
+	ti.Warnings = append(ti.Warnings, warnings...)
 	return &ti, nil
 }
 
+// UpdateIssue sends only the fields whose mapped value differs from Jira, and
+// transitions status only when the beads-level status differs. Comparing in
+// beads space means lossy mappings (e.g. an "Undetermined" priority or a
+// "Cancelled" status) are not rewritten unless the bead actually changed.
 func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *types.Issue) (*tracker.TrackerIssue, error) {
 	mapper := t.FieldMapper()
-	fields := mapper.IssueToTracker(issue)
 
-	if err := t.client.UpdateIssue(ctx, externalID, fields); err != nil {
-		return nil, err
-	}
-
-	// Fetch current state to check whether a status transition is actually needed.
 	current, err := t.client.GetIssue(ctx, externalID)
 	if err != nil {
 		return nil, err
 	}
+	currentTI := jiraToTrackerIssue(current, t.priorityMap)
+	diff := t.PushFieldDiff(issue, &currentTI)
+	if len(diff) == 0 {
+		debug.Logf("jira: update %s (%s): no changes\n", externalID, issue.ID)
+		return &currentTI, nil
+	}
+	debug.Logf("jira: update %s (%s): changed %s\n", externalID, issue.ID, strings.Join(diff, ","))
 
-	desiredName, _ := mapper.StatusToTracker(issue.Status).(string)
-	currentName := ""
-	if current.Fields.Status != nil {
-		currentName = current.Fields.Status.Name
+	all := mapper.IssueToTracker(issue)
+	fields := make(map[string]interface{})
+	statusChanged := false
+	for _, name := range diff {
+		if name == "status" {
+			statusChanged = true
+			continue
+		}
+		if v, ok := all[name]; ok {
+			fields[name] = v
+		} else if name == "description" {
+			fields[name] = "" // cleared locally
+		}
 	}
 
-	if !strings.EqualFold(currentName, desiredName) {
-		// Status differs — apply the workflow transition.
+	if len(fields) > 0 {
+		if err := t.client.UpdateIssue(ctx, externalID, fields); err != nil {
+			return nil, err
+		}
+	}
+	if statusChanged {
 		if err := t.applyTransition(ctx, externalID, issue.Status); err != nil {
 			return nil, err
 		}
-		// Re-fetch to return the state after the transition.
-		current, err = t.client.GetIssue(ctx, externalID)
-		if err != nil {
-			return nil, err
-		}
 	}
 
+	// Re-fetch to return the state after the update.
+	current, err = t.client.GetIssue(ctx, externalID)
+	if err != nil {
+		return nil, err
+	}
 	ti := jiraToTrackerIssue(current, t.priorityMap)
 	return &ti, nil
 }
@@ -393,6 +425,7 @@ func (t *Tracker) FieldMapper() tracker.FieldMapper {
 		typeCustomFields: t.typeCustomFields,
 		epicLinkField:    t.epicLinkField,
 		parentLinkField:  t.parentLinkField,
+		pushLabel:        t.pushLabel,
 	}
 }
 
