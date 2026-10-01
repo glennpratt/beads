@@ -19,6 +19,7 @@ type jiraFieldMapper struct {
 	epicLinkField    string                            // Epic Link custom field ID (Server/DC), "" if unavailable
 	parentLinkField  string                            // Parent Link custom field ID (Advanced Roadmaps), "" if unavailable
 	pushLabel        string                            // jira.push_label marker; never sent to Jira
+	localLabels      []string                          // jira.local_labels glob patterns; never sent to Jira
 }
 
 func (m *jiraFieldMapper) PriorityToBeads(trackerPriority interface{}) int {

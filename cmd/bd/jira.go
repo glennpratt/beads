@@ -30,6 +30,11 @@ Configuration:
   bd config set jira.push_label "jira"         # Create only beads labeled "jira"
                                                # (linked beads still update; the
                                                # label is not sent to Jira)
+  bd config set jira.local_labels "q4-*,me:*"  # Personal labels: never sent to
+                                               # Jira, kept across pulls
+
+Labels: a pull keeps labels added locally and records Jira's labels in the
+bead's metadata (jira_labels), so labels removed in Jira are removed locally.
 
 Self-hosted Jira (Server/Data Center):
   bd config set jira.api_version "2"            # REST API v2
@@ -164,6 +169,7 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore, jt, nil)
+	engine.PullHooks = buildJiraPullHooks(jt, engine.OnWarning)
 
 	opts := tracker.SyncOptions{
 		Pull:       pull,
@@ -267,6 +273,21 @@ func buildJiraPushHooksForStore(ctx context.Context, st tracker.Store, jt *jira.
 				return ""
 			}
 			return strings.Join(jt.PushFieldDiff(local, remote), ", ")
+		},
+	}
+}
+
+// buildJiraPullHooks keeps local labels and pending local field edits
+// across pulls (see jira.Tracker.MergePulled).
+func buildJiraPullHooks(jt *jira.Tracker, warn func(string)) *tracker.PullHooks {
+	return &tracker.PullHooks{
+		AfterConvert: func(_ context.Context, extIssue *tracker.TrackerIssue, conv *tracker.IssueConversion, _ string, existing *types.Issue, _ tracker.SyncOptions) error {
+			for _, w := range jt.MergePulled(extIssue, conv, existing) {
+				if warn != nil {
+					warn(w)
+				}
+			}
+			return nil
 		},
 	}
 }

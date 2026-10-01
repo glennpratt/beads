@@ -562,7 +562,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			conv.Issue.Labels = existing.Labels
 		}
 
-		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) && trackerMetadataCurrent(existing.Metadata, extIssue.Metadata) {
 			if !opts.DryRun {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
@@ -772,6 +772,28 @@ func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref strin
 		updates["external_ref"] = trimmedRef
 	}
 	return updates
+}
+
+// trackerMetadataCurrent reports whether every key the tracker supplies in
+// metadata already has the same value in the local issue's metadata. Keys the
+// tracker does not supply (e.g. user annotations) are ignored, so a pull still
+// skips unchanged issues but records tracker-owned metadata when it changes.
+func trackerMetadataCurrent(local json.RawMessage, tracker map[string]interface{}) bool {
+	if len(tracker) == 0 {
+		return true
+	}
+	var localMap map[string]interface{}
+	if len(local) == 0 || json.Unmarshal(local, &localMap) != nil {
+		return false
+	}
+	for k, v := range tracker {
+		want, err1 := json.Marshal(v)
+		got, err2 := json.Marshal(localMap[k])
+		if err1 != nil || err2 != nil || string(want) != string(got) {
+			return false
+		}
+	}
+	return true
 }
 
 func marshalTrackerMetadata(metadata interface{}) (json.RawMessage, bool) {
