@@ -450,6 +450,7 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	currentTI := jiraToTrackerIssue(current, t.priorityMap)
 	diff := t.PushFieldDiff(issue, &currentTI)
 	rc := t.relationDiff(ctx, issue)
+	rc.closeComment = closeCommentFor(issue, diff)
 	if len(diff) == 0 && rc.empty() {
 		debug.Logf("jira: update %s (%s): no changes\n", externalID, issue.ID)
 		return &currentTI, nil
@@ -491,6 +492,11 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 		}
 	}
 	if err := t.applyRelationLinks(ctx, externalID, rc); err != nil {
+		return nil, err
+	}
+	// Comment before a close transition, so the reason precedes the close
+	// and is posted even if the workflow closes without a comment screen.
+	if err := t.applyComments(ctx, externalID, rc); err != nil {
 		return nil, err
 	}
 	t.recordPushedRelations(ctx, issue, rc)

@@ -65,9 +65,46 @@ func (t *Tracker) PushFieldDiff(local *types.Issue, remote *tracker.TrackerIssue
 }
 
 // PushChanges lists everything a push would change for a linked bead:
-// changed fields plus hierarchy/link operations (see relations.go).
+// changed fields plus hierarchy/link/comment operations (see relations.go).
 func (t *Tracker) PushChanges(ctx context.Context, local *types.Issue, remote *tracker.TrackerIssue) []string {
-	return append(t.PushFieldDiff(local, remote), t.relationDiff(ctx, local).describe()...)
+	diff := t.PushFieldDiff(local, remote)
+	rc := t.relationDiff(ctx, local)
+	rc.closeComment = closeCommentFor(local, diff)
+	return append(diff, rc.describe()...)
+}
+
+// jiraCloseCommentMetadataKey records a hash of the close reason already
+// posted, so a close whose transition fails (or a workflow without a close
+// transition) does not re-post it on every push.
+const jiraCloseCommentMetadataKey = "jira_close_comment"
+
+// closeCommentFor returns the close reason to post with a pending close, or "".
+func closeCommentFor(local *types.Issue, diff []string) string {
+	if !containsString(diff, "status") || local.Status != types.StatusClosed || !meaningfulCloseReason(local.CloseReason) {
+		return ""
+	}
+	if metadataString(local.Metadata, jiraCloseCommentMetadataKey) == fieldHash(normalizeText(local.CloseReason)) {
+		return ""
+	}
+	return local.CloseReason
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// meaningfulCloseReason skips empty and boilerplate close reasons.
+func meaningfulCloseReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "closed", "done", "completed", "complete", "fixed":
+		return false
+	}
+	return true
 }
 
 // PushUpToDate reports whether a push would send nothing for a linked bead.

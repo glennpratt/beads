@@ -210,3 +210,83 @@ func TestUpdateIssuePushesRelations(t *testing.T) {
 		t.Errorf("records after push = %v", meta)
 	}
 }
+
+// commentStore adds comments to relStore.
+type commentStore struct {
+	*relStore
+	comments map[string][]*types.Comment
+}
+
+func (s *commentStore) GetIssueComments(_ context.Context, id string) ([]*types.Comment, error) {
+	return s.comments[id], nil
+}
+
+func TestPushComments(t *testing.T) {
+	var mu sync.Mutex
+	var posted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/transitions"):
+			_, _ = w.Write([]byte(`{"transitions":[]}`)) // no close transition available
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"key":"P-1","fields":{"summary":"s","issuetype":{"name":"Story"},"status":{"name":"Open"}}}`))
+		case strings.HasSuffix(r.URL.Path, "/comment"):
+			posted = append(posted, string(body))
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	st := &commentStore{relStore: newRelStore(), comments: map[string][]*types.Comment{}}
+	a := st.bead("a", "P-1", types.TypeStory, `{"jira_parents":[],"jira_links":[]}`)
+	a.Title, a.Status, a.Priority = "s", types.StatusOpen, 2
+	st.comments["a"] = []*types.Comment{{ID: "c1", Text: "taking this"}}
+	tr := relTracker(st.relStore)
+	tr.store = st
+	tr.client, tr.apiVersion, tr.typeMap = newTestClient(srv.URL, "2"), "2", map[string]string{"story": "Story"}
+
+	if got := tr.relationDiff(context.Background(), a).describe(); !reflect.DeepEqual(got, []string{"+comment: taking this"}) {
+		t.Errorf("describe = %v", got)
+	}
+	if _, err := tr.UpdateIssue(context.Background(), "P-1", a); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(posted, []string{`{"body":"taking this"}`}) {
+		t.Errorf("posted = %v", posted)
+	}
+	// The record now lists c1; with it, nothing is pending.
+	a.Metadata = st.updates["a"]["metadata"].(json.RawMessage)
+	if rc := tr.relationDiff(context.Background(), a); !rc.empty() {
+		t.Errorf("after push: %v", rc.describe())
+	}
+
+	// Close with a reason: posted once even though no close transition exists.
+	posted = nil
+	a.Status, a.CloseReason = types.StatusClosed, "duplicate of P-9"
+	for i := 0; i < 2; i++ {
+		if _, err := tr.UpdateIssue(context.Background(), "P-1", a); err != nil {
+			t.Fatal(err)
+		}
+		if u, ok := st.updates["a"]["metadata"].(json.RawMessage); ok {
+			a.Metadata = u
+		}
+	}
+	if !reflect.DeepEqual(posted, []string{`{"body":"duplicate of P-9"}`}) {
+		t.Errorf("close comments posted = %v, want once", posted)
+	}
+
+	// Boilerplate reasons and disabled comment push send nothing.
+	if closeCommentFor(&types.Issue{Status: types.StatusClosed, CloseReason: "done"}, []string{"status"}) != "" {
+		t.Error("boilerplate close reason should not be posted")
+	}
+	st.configStore.data["jira.push_comments"] = "false"
+	st.comments["a"] = append(st.comments["a"], &types.Comment{ID: "c2", Text: "more"})
+	if rc := tr.relationDiff(context.Background(), a); len(rc.comments) != 0 {
+		t.Errorf("push_comments=false still pending: %v", rc.describe())
+	}
+}
