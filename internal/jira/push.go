@@ -64,6 +64,17 @@ func (t *Tracker) PushFieldDiff(local *types.Issue, remote *tracker.TrackerIssue
 	return diff
 }
 
+// PushChanges lists everything a push would change for a linked bead:
+// changed fields plus hierarchy/link operations (see relations.go).
+func (t *Tracker) PushChanges(ctx context.Context, local *types.Issue, remote *tracker.TrackerIssue) []string {
+	return append(t.PushFieldDiff(local, remote), t.relationDiff(ctx, local).describe()...)
+}
+
+// PushUpToDate reports whether a push would send nothing for a linked bead.
+func (t *Tracker) PushUpToDate(ctx context.Context, local *types.Issue, remote *tracker.TrackerIssue) bool {
+	return len(t.PushFieldDiff(local, remote)) == 0 && t.relationDiff(ctx, local).empty()
+}
+
 // normalizeText makes descriptions comparable across Jira's CRLF line endings
 // and trailing whitespace.
 func normalizeText(s string) string {

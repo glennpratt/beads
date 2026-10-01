@@ -47,6 +47,7 @@ var defaultLinkKinds = map[string]string{
 
 // IssueLink is an entry of the issuelinks field.
 type IssueLink struct {
+	ID   string `json:"id,omitempty"`
 	Type struct {
 		Name    string `json:"name"`
 		Inward  string `json:"inward"`

@@ -53,6 +53,32 @@ func (b *BoardConfig) ColumnForStatus(statusID string) string {
 	return ""
 }
 
+// CreateIssueLink links two issues. For a link type whose outward text is
+// "blocks", inwardKey blocks outwardKey (Jira's REST API puts the outward
+// description on the inward issue).
+func (c *Client) CreateIssueLink(ctx context.Context, typeName, inwardKey, outwardKey string) error {
+	body, err := json.Marshal(map[string]interface{}{
+		"type":         map[string]string{"name": typeName},
+		"inwardIssue":  map[string]string{"key": inwardKey},
+		"outwardIssue": map[string]string{"key": outwardKey},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := c.doRequest(ctx, "POST", c.apiBase()+"/issueLink", body); err != nil {
+		return fmt.Errorf("link %s %s %s: %w", inwardKey, typeName, outwardKey, err)
+	}
+	return nil
+}
+
+// DeleteIssueLink removes an issue link by ID.
+func (c *Client) DeleteIssueLink(ctx context.Context, linkID string) error {
+	if _, err := c.doRequest(ctx, "DELETE", c.apiBase()+"/issueLink/"+url.PathEscape(linkID), nil); err != nil {
+		return fmt.Errorf("delete link %s: %w", linkID, err)
+	}
+	return nil
+}
+
 func (c *Client) agileBase() string { return c.URL + "/rest/agile/1.0" }
 
 // GetBoardConfig fetches a board's configuration.

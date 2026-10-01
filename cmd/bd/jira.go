@@ -265,7 +265,7 @@ func buildJiraPushHooksForStore(ctx context.Context, st tracker.Store, jt *jira.
 			if jt == nil {
 				return false
 			}
-			return len(jt.PushFieldDiff(local, remote)) == 0
+			return jt.PushUpToDate(ctx, local, remote)
 		},
 		DescribeCreate: func(ctx context.Context, issue *types.Issue) string {
 			if jt == nil {
@@ -277,7 +277,7 @@ func buildJiraPushHooksForStore(ctx context.Context, st tracker.Store, jt *jira.
 			if jt == nil {
 				return ""
 			}
-			return strings.Join(jt.PushFieldDiff(local, remote), ", ")
+			return strings.Join(jt.PushChanges(ctx, local, remote), ", ")
 		},
 	}
 }
