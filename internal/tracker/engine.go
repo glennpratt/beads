@@ -194,6 +194,15 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 	if e == nil || e.Store == nil {
 		return nil, fmt.Errorf("tracker sync store is not initialized")
 	}
+
+	// Keep the database open for the whole sync instead of per operation.
+	if h, ok := connectionHolder(e.Store); ok {
+		if release, err := h.HoldConnection(ctx); err == nil {
+			defer func() { _ = release() }()
+		} else {
+			debug.Logf("tracker: holding connection: %v\n", err)
+		}
+	}
 	ctx, span := syncTracer.Start(ctx, "tracker.sync",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
@@ -1240,6 +1249,25 @@ func prelinkDecision(local *types.Issue, currentRef, previousRef string, found b
 	return false, true
 }
 
+// connectionHolder finds the hold-connection capability, unwrapping storage
+// decorators like externalRefsAsOfQuerier does.
+func connectionHolder(store Store) (ConnectionHolder, bool) {
+	if h, ok := store.(ConnectionHolder); ok {
+		return h, true
+	}
+	if direct, ok := store.(*directStore); ok {
+		if h, ok := direct.Storage.(ConnectionHolder); ok {
+			return h, true
+		}
+		if dolt, ok := direct.Storage.(storage.DoltStorage); ok {
+			if h, ok := storage.UnwrapStore(dolt).(ConnectionHolder); ok {
+				return h, true
+			}
+		}
+	}
+	return nil, false
+}
+
 // externalRefsAsOfQuerier finds the batch history capability, unwrapping
 // storage decorators like externalRefHistoryQuerier does.
 func externalRefsAsOfQuerier(store Store) (storage.ExternalRefsAsOfQuerier, bool) {
@@ -2047,6 +2075,7 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		return len(deps)
 	}
 
+	cache := newDepCache(e.Store)
 	errCount := 0
 	for _, dep := range deps {
 		fromIssue, err := resolveIssue(ctx, dep.FromExternalID, dep.FromIdentityKey)
@@ -2065,11 +2094,10 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		if fromIssue == nil || toIssue == nil {
 			continue // Not found (no error) — expected if issue wasn't imported
 		}
-		if dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
-			continue
-		}
-		if existing := dependencyTypeBetween(ctx, e.Store, fromIssue.ID, toIssue.ID); existing != "" {
-			debug.Logf("tracker: %s -> %s already linked as %s; skipping %s from %s\n", fromIssue.ID, toIssue.ID, existing, dep.Type, e.Tracker.DisplayName())
+		if existing := cache.typeBetween(ctx, fromIssue.ID, toIssue.ID); existing != "" {
+			if existing != types.DependencyType(dep.Type) {
+				debug.Logf("tracker: %s -> %s already linked as %s; skipping %s from %s\n", fromIssue.ID, toIssue.ID, existing, dep.Type, e.Tracker.DisplayName())
+			}
 			continue
 		}
 
@@ -2081,7 +2109,9 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		if err := e.Store.AddDependency(ctx, d, e.Actor); err != nil {
 			e.warn("Failed to create dependency %s -> %s: %v", fromIssue.ID, toIssue.ID, err)
 			errCount++
+			continue
 		}
+		cache.add(fromIssue.ID, toIssue.ID, d.Type)
 	}
 	return errCount
 }
@@ -2104,6 +2134,7 @@ func (e *Engine) applyDependencyRemovals(ctx context.Context, deps []DependencyI
 		e.warn("Failed to build dependency resolver: %v", err)
 		return len(deps)
 	}
+	cache := newDepCache(e.Store)
 	errCount := 0
 	for _, dep := range deps {
 		fromIssue, err1 := resolveIssue(ctx, dep.FromExternalID, dep.FromIdentityKey)
@@ -2111,7 +2142,7 @@ func (e *Engine) applyDependencyRemovals(ctx context.Context, deps []DependencyI
 		if err1 != nil || err2 != nil || fromIssue == nil || toIssue == nil {
 			continue
 		}
-		if !dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
+		if cache.typeBetween(ctx, fromIssue.ID, toIssue.ID) != types.DependencyType(dep.Type) {
 			continue
 		}
 		if dryRun {
@@ -2123,6 +2154,7 @@ func (e *Engine) applyDependencyRemovals(ctx context.Context, deps []DependencyI
 			errCount++
 			continue
 		}
+		cache.remove(fromIssue.ID, toIssue.ID)
 		e.msg("Removed %s dependency %s -> %s (no longer in %s)", dep.Type, fromIssue.ID, toIssue.ID, e.Tracker.DisplayName())
 	}
 	return errCount
@@ -2139,6 +2171,7 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 		return len(deps)
 	}
 
+	cache := newDepCache(e.Store)
 	wouldCreate := 0
 	pending := make(map[string]struct{}, len(deps))
 	for _, dep := range deps {
@@ -2155,7 +2188,7 @@ func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo,
 		if fromIssue == nil || toIssue == nil {
 			continue
 		}
-		if dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
+		if cache.typeBetween(ctx, fromIssue.ID, toIssue.ID) == types.DependencyType(dep.Type) {
 			continue
 		}
 		key := pendingDependencyPreviewKey(fromIssue.ID, toIssue.ID, dep.Type)
@@ -2295,35 +2328,51 @@ func depStrength(t string) int {
 	return 0
 }
 
-// dependencyTypeBetween returns the type of an existing issueID ->
-// dependsOnID dependency, or "".
-func dependencyTypeBetween(ctx context.Context, store Store, issueID, dependsOnID string) types.DependencyType {
-	records, err := store.GetDependenciesWithMetadata(ctx, issueID)
-	if err != nil {
-		return ""
-	}
-	for _, record := range records {
-		if record.ID == dependsOnID {
-			return record.DependencyType
-		}
-	}
-	return ""
+// depCache memoizes each issue's outgoing dependencies for one pass of
+// dependency creation or removal: one store read per issue instead of
+// several per dependency.
+type depCache struct {
+	store Store
+	deps  map[string]map[string]types.DependencyType // issue -> depends-on -> type
 }
 
-func dependencyExists(ctx context.Context, store Store, issueID, dependsOnID string, depType types.DependencyType) bool {
-	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(dependsOnID) == "" {
-		return false
+func newDepCache(store Store) *depCache {
+	return &depCache{store: store, deps: make(map[string]map[string]types.DependencyType)}
+}
+
+func (c *depCache) load(ctx context.Context, issueID string) map[string]types.DependencyType {
+	if m, ok := c.deps[issueID]; ok {
+		return m
 	}
-	records, err := store.GetDependenciesWithMetadata(ctx, issueID)
-	if err != nil {
-		return false
-	}
-	for _, record := range records {
-		if record.ID == dependsOnID && record.DependencyType == depType {
-			return true
+	m := make(map[string]types.DependencyType)
+	if records, err := c.store.GetDependenciesWithMetadata(ctx, issueID); err == nil {
+		for _, r := range records {
+			m[r.ID] = r.DependencyType
 		}
 	}
-	return false
+	c.deps[issueID] = m
+	return m
+}
+
+// typeBetween returns the type of an existing issueID -> dependsOnID
+// dependency, or "".
+func (c *depCache) typeBetween(ctx context.Context, issueID, dependsOnID string) types.DependencyType {
+	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(dependsOnID) == "" {
+		return ""
+	}
+	return c.load(ctx, issueID)[dependsOnID]
+}
+
+func (c *depCache) add(issueID, dependsOnID string, t types.DependencyType) {
+	if m, ok := c.deps[issueID]; ok {
+		m[dependsOnID] = t
+	}
+}
+
+func (c *depCache) remove(issueID, dependsOnID string) {
+	if m, ok := c.deps[issueID]; ok {
+		delete(m, dependsOnID)
+	}
 }
 
 func firstNonEmpty(values ...string) string {
