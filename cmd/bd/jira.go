@@ -39,9 +39,11 @@ bead's metadata (jira_labels), so labels removed in Jira are removed locally.
 Self-hosted Jira (Server/Data Center):
   bd config set jira.api_version "2"            # REST API v2
   bd config set jira.api_token "YOUR_PAT"       # No username: sent as Bearer PAT
-  bd config set jira.client_cert "~/certs/me.pem"  # Mutual TLS (with client_key)
-  bd config set jira.client_key "~/certs/me.key"
-  bd config set jira.ca_cert "~/certs/corp-root.crt"  # Extra trusted CA
+  export JIRA_CLIENT_CERT=~/certs/me.pem       # Mutual TLS (with JIRA_CLIENT_KEY)
+  export JIRA_CLIENT_KEY=~/certs/me.key
+  export JIRA_CA_CERT=~/certs/corp-root.crt    # Extra trusted CA
+  # (jira.client_cert/client_key/ca_cert also work, but bd will not write
+  # cert/key keys to a git-tracked config.yaml)
 
 Hierarchy (pulled as parent-child dependencies; parents must be pulled too):
   The standard parent field (sub-tasks; all levels on Jira Cloud) is always
