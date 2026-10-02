@@ -352,3 +352,62 @@ func TestCreateIssueCreatesLinks(t *testing.T) {
 		t.Errorf("recorded links = %v", meta["jira_links"])
 	}
 }
+
+func TestCreateLinkFallsBackToDependent(t *testing.T) {
+	var mu sync.Mutex
+	var links []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/issue"):
+			_, _ = w.Write([]byte(`{"id":"1","key":"P-100","self":"x"}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/issueLink"):
+			// Linking from a CARS issue is not permitted.
+			if strings.Contains(string(body), `"inwardIssue":{"key":"CARS-1"}`) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"errorMessages":["No Link Issue Permission for issue 'CARS-1'"]}`))
+				return
+			}
+			links = append(links, string(body))
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/createmeta"):
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(`{"key":"P-100","fields":{}}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	st := newRelStore()
+	n := st.bead("n", "", types.TypeTask, "")
+	n.Title, n.Priority = "new", 2
+	st.bead("cars", "CARS-1", types.TypeTask, "")
+	st.bead("rose", "ROSE-1", types.TypeEpic, "")
+	st.link("n", "cars", types.DepBlocks)
+	st.link("n", "rose", types.DepBlocks)
+	tr := relTracker(st)
+	tr.client, tr.apiVersion, tr.projectKeys = newTestClient(srv.URL, "2"), "2", []string{"P"}
+
+	created, err := tr.CreateIssue(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none (fallback succeeded)", created.Warnings)
+	}
+	want := []string{
+		`{"inwardIssue":{"key":"P-100"},"outwardIssue":{"key":"CARS-1"},"type":{"name":"Dependent"}}`,
+		`{"inwardIssue":{"key":"ROSE-1"},"outwardIssue":{"key":"P-100"},"type":{"name":"Blocks"}}`,
+	}
+	if !reflect.DeepEqual(links, want) {
+		t.Errorf("links:\n%s\nwant:\n%s", strings.Join(links, "\n"), strings.Join(want, "\n"))
+	}
+	raw, _ := st.updates["n"]["metadata"].(json.RawMessage)
+	var meta map[string]interface{}
+	_ = json.Unmarshal(raw, &meta)
+	if !reflect.DeepEqual(meta["jira_links"], []interface{}{"blocks|P-100|CARS-1", "blocks|P-100|ROSE-1"}) {
+		t.Errorf("recorded = %v", meta["jira_links"])
+	}
+}
