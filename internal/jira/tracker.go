@@ -432,6 +432,19 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		return nil, err
 	}
 
+	// Links and comments of the new issue: nothing records them yet, so a
+	// later push would not send them.
+	if rc := t.createRelations(ctx, issue, created.Key); !rc.empty() {
+		debug.Logf("jira: create %s as %s: %v\n", issue.ID, created.Key, rc.describe())
+		if err := t.applyRelationLinks(ctx, created.Key, rc); err != nil {
+			warnings = append(warnings, fmt.Sprintf("created %s but linking failed: %v", created.Key, err))
+		} else if err := t.applyComments(ctx, created.Key, rc); err != nil {
+			warnings = append(warnings, fmt.Sprintf("created %s but commenting failed: %v", created.Key, err))
+		} else {
+			t.recordPushedRelations(ctx, issue, rc)
+		}
+	}
+
 	ti := jiraToTrackerIssue(created, t.priorityMap)
 	ti.Warnings = append(ti.Warnings, warnings...)
 	return &ti, nil

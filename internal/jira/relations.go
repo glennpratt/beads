@@ -130,17 +130,38 @@ func (t *Tracker) jiraKeyOf(issue *types.Issue) string {
 // relationDiff computes hierarchy and link changes to push for a linked bead.
 // Beads without pull records (never pulled since this was added) push none.
 func (t *Tracker) relationDiff(ctx context.Context, local *types.Issue) *relationChanges {
-	rc := &relationChanges{}
 	this := t.jiraKeyOf(local)
 	if this == "" || t.store == nil {
-		return rc
+		return &relationChanges{}
 	}
-	rc.comments = t.pendingComments(ctx, local)
 	recParents, haveParents := stringListMeta(local.Metadata, jiraParentsMetadataKey)
 	for i, p := range recParents {
 		recParents[i] = strings.ToUpper(p)
 	}
 	recLinks, haveLinks := stringListMeta(local.Metadata, jiraLinksMetadataKey)
+	rc := t.relationChangesFor(ctx, local, this, recParents, haveParents, recLinks, haveLinks, false)
+	rc.comments = t.pendingComments(ctx, local)
+	return rc
+}
+
+// createRelations returns the links to create (and comments to post) for a
+// bead just created in Jira as key: every local link to a Jira-linked bead,
+// since nothing has been recorded yet and the other end has no record of
+// it either. The parent is placed by the create itself.
+func (t *Tracker) createRelations(ctx context.Context, local *types.Issue, key string) *relationChanges {
+	if t.store == nil {
+		return &relationChanges{}
+	}
+	rc := t.relationChangesFor(ctx, local, strings.ToUpper(key), nil, false, []string{}, true, true)
+	rc.comments = t.pendingComments(ctx, local)
+	return rc
+}
+
+// relationChangesFor diffs local relationships of the bead (as Jira key this)
+// against the given records. ownAll creates links regardless of which end
+// would normally own them (used for new issues).
+func (t *Tracker) relationChangesFor(ctx context.Context, local *types.Issue, this string, recParents []string, haveParents bool, recLinks []string, haveLinks, ownAll bool) *relationChanges {
+	rc := &relationChanges{}
 	if !haveParents && !haveLinks {
 		return rc
 	}
@@ -206,7 +227,7 @@ func (t *Tracker) relationDiff(ctx context.Context, local *types.Issue) *relatio
 			recorded[sig] = true
 		}
 		// The owning end acts, so a link is created or deleted once.
-		owns := func(d tracker.DependencyInfo) bool { return strings.EqualFold(d.FromExternalID, this) }
+		owns := func(d tracker.DependencyInfo) bool { return ownAll || strings.EqualFold(d.FromExternalID, this) }
 		for sig, d := range localLinks {
 			if !recorded[sig] && owns(d) {
 				rc.addLinks = append(rc.addLinks, linkOp{dep: d, sig: sig})

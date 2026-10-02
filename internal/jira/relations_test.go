@@ -290,3 +290,65 @@ func TestPushComments(t *testing.T) {
 		t.Errorf("push_comments=false still pending: %v", rc.describe())
 	}
 }
+
+func TestCreateIssueCreatesLinks(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/issue"):
+			calls = append(calls, "create")
+			_, _ = w.Write([]byte(`{"id":"1","key":"P-100","self":"x"}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/issue/P-100"):
+			_, _ = w.Write([]byte(`{"key":"P-100","fields":{"summary":"new"}}`))
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/createmeta"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost:
+			calls = append(calls, "POST "+strings.TrimPrefix(r.URL.Path, "/rest/api/2")+" "+string(body))
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	st := newRelStore()
+	n := st.bead("n", "", types.TypeTask, "")
+	n.Title, n.Priority, n.Labels = "new", 2, []string{"jira"}
+	st.bead("cars", "CARS-1", types.TypeTask, "")
+	st.bead("epic", "P-1", types.TypeEpic, "")
+	st.bead("mine", "", types.TypeTask, "")
+	st.link("n", "cars", types.DepBlocks)      // n waits on CARS-1
+	st.link("n", "mine", types.DepBlocks)      // local-only blocker: not sent
+	st.link("n", "epic", types.DepParentChild) // placed by the create itself
+
+	tr := relTracker(st)
+	tr.client, tr.apiVersion, tr.projectKeys = newTestClient(srv.URL, "2"), "2", []string{"P"}
+
+	if got := tr.DescribeCreate(context.Background(), n); !strings.Contains(got, "+CARS-1 blocks (NEW)") {
+		t.Errorf("preview = %q, want the link listed", got)
+	}
+	created, err := tr.CreateIssue(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Warnings) != 0 {
+		t.Errorf("warnings = %v", created.Warnings)
+	}
+	want := []string{
+		"create",
+		`POST /issueLink {"inwardIssue":{"key":"CARS-1"},"outwardIssue":{"key":"P-100"},"type":{"name":"Blocks"}}`,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+	raw, _ := st.updates["n"]["metadata"].(json.RawMessage)
+	var meta map[string]interface{}
+	_ = json.Unmarshal(raw, &meta)
+	if !reflect.DeepEqual(meta["jira_links"], []interface{}{"blocks|P-100|CARS-1"}) {
+		t.Errorf("recorded links = %v", meta["jira_links"])
+	}
+}
