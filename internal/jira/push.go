@@ -346,6 +346,7 @@ func (t *Tracker) DescribeCreate(ctx context.Context, issue *types.Issue) string
 	if labels, ok := fields["labels"].([]string); ok && len(labels) > 0 {
 		parts = append(parts, "labels "+strings.Join(labels, ","))
 	}
+	parts = append(parts, t.createRelations(ctx, issue, "(new)").describe()...)
 	for _, w := range warnings {
 		parts = append(parts, "warning: "+w)
 	}
