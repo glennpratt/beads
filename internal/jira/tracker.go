@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -437,12 +438,13 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	if rc := t.createRelations(ctx, issue, created.Key); !rc.empty() {
 		debug.Logf("jira: create %s as %s: %v\n", issue.ID, created.Key, rc.describe())
 		if err := t.applyRelationLinks(ctx, created.Key, rc); err != nil {
-			warnings = append(warnings, fmt.Sprintf("created %s but linking failed: %v", created.Key, err))
-		} else if err := t.applyComments(ctx, created.Key, rc); err != nil {
-			warnings = append(warnings, fmt.Sprintf("created %s but commenting failed: %v", created.Key, err))
-		} else {
-			t.recordPushedRelations(ctx, issue, rc)
+			warnings = append(warnings, fmt.Sprintf("created %s; some links failed (retried on the next push): %v", created.Key, err))
 		}
+		if err := t.applyComments(ctx, created.Key, rc); err != nil {
+			warnings = append(warnings, fmt.Sprintf("created %s but commenting failed: %v", created.Key, err))
+			rc.comments = nil
+		}
+		t.recordPushedRelations(ctx, issue, rc)
 	}
 
 	ti := jiraToTrackerIssue(created, t.priorityMap)
@@ -505,8 +507,13 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 			return nil, err
 		}
 	}
+	var warnings []string
 	if err := t.applyRelationLinks(ctx, externalID, rc); err != nil {
-		return nil, err
+		var lf *linkFailures
+		if !errors.As(err, &lf) {
+			return nil, err
+		}
+		warnings = append(warnings, fmt.Sprintf("%s: some links failed (retried on the next push): %v", externalID, err))
 	}
 	// Comment before a close transition, so the reason precedes the close
 	// and is posted even if the workflow closes without a comment screen.
@@ -526,6 +533,7 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 		return nil, err
 	}
 	ti := jiraToTrackerIssue(current, t.priorityMap)
+	ti.Warnings = append(ti.Warnings, warnings...)
 	return &ti, nil
 }
 

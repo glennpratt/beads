@@ -1338,7 +1338,13 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				}
 			}
 
-			if _, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue); err != nil {
+			updated, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue)
+			if err == nil && updated != nil {
+				for _, w := range updated.Warnings {
+					e.warn("%s (%s)", w, issue.ID)
+				}
+			}
+			if err != nil {
 				if isRateLimitExhausted(err) {
 					return stats, fmt.Errorf("sync aborted: %w", err)
 				}

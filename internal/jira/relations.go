@@ -407,17 +407,69 @@ func (t *Tracker) applyRelationLinks(ctx context.Context, externalID string, rc 
 			}
 		}
 	}
+	var failures []string
+	var added []linkOp
 	for _, op := range rc.addLinks {
-		typeName := t.pushLinkType(ctx, types.DependencyType(op.dep.Type))
-		inward, outward := op.dep.FromExternalID, op.dep.ToExternalID
-		if types.DependencyType(op.dep.Type) == types.DepBlocks {
-			inward, outward = op.dep.ToExternalID, op.dep.FromExternalID // To blocks From
+		if err := t.createLink(ctx, op.dep); err != nil {
+			failures = append(failures, err.Error())
+			continue
 		}
-		if err := t.client.CreateIssueLink(ctx, typeName, inward, outward); err != nil {
-			return err
-		}
+		added = append(added, op)
+	}
+	rc.addLinks = added // only links that exist are recorded; failed ones retry next push
+	if len(failures) > 0 {
+		return &linkFailures{failures}
 	}
 	return nil
+}
+
+// linkFailures reports links that could not be created; the rest were.
+type linkFailures struct{ msgs []string }
+
+func (e *linkFailures) Error() string { return strings.Join(e.msgs, "; ") }
+
+// createLink creates the Jira link for a dependency. The link type's kind
+// decides direction (Jira's REST API puts the outward description on the
+// inward issue). A blocking link refused for lack of permission on the
+// blocker (e.g. a service-desk project) is retried as the waiting issue's
+// "depends on" link (jira.push_link_type.blocks_fallback, default
+// "Dependent"), which needs permission only on the waiting issue.
+func (t *Tracker) createLink(ctx context.Context, d tracker.DependencyInfo) error {
+	typ := types.DependencyType(d.Type)
+	create := func(typeName string) error {
+		inward, outward := d.FromExternalID, d.ToExternalID
+		switch linkKind(t.linkMap, typeName) {
+		case linkBlocks: // inward blocks outward: the blocker (To) is inward
+			inward, outward = d.ToExternalID, d.FromExternalID
+		case linkParent: // inward is the parent of outward
+			inward, outward = d.ToExternalID, d.FromExternalID
+		}
+		return t.client.CreateIssueLink(ctx, typeName, inward, outward)
+	}
+	typeName := t.pushLinkType(ctx, typ)
+	err := create(typeName)
+	if err == nil || typ != types.DepBlocks || !isPermissionError(err) {
+		return err
+	}
+	fallback := "Dependent"
+	if t.store != nil {
+		if v, _ := t.getConfig(ctx, "jira.push_link_type.blocks_fallback", ""); strings.TrimSpace(v) != "" {
+			fallback = strings.TrimSpace(v)
+		}
+	}
+	if strings.EqualFold(fallback, typeName) || linkKind(t.linkMap, fallback) != linkDependsOn {
+		return err
+	}
+	debug.Logf("jira: %s %s %s refused (%v); retrying as %s\n", d.ToExternalID, typeName, d.FromExternalID, err, fallback)
+	if ferr := create(fallback); ferr != nil {
+		return fmt.Errorf("%v; fallback %s: %w", err, fallback, ferr)
+	}
+	return nil
+}
+
+func isPermissionError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "returned 401") || strings.Contains(msg, "returned 403") || strings.Contains(strings.ToLower(msg), "permission")
 }
 
 func (t *Tracker) pushLinkType(ctx context.Context, typ types.DependencyType) string {
