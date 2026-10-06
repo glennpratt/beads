@@ -515,17 +515,29 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 		}
 		warnings = append(warnings, fmt.Sprintf("%s: some links failed (retried on the next push): %v", externalID, err))
 	}
-	// Comment before a close transition, so the reason precedes the close
-	// and is posted even if the workflow closes without a comment screen.
+	// Transition before posting comments: a workflow may require a comment
+	// on the transition, so offer it the close reason or the newest pending
+	// comment, which is then sent with the transition instead of on its own.
+	if statusChanged {
+		offered := rc.transitionComment()
+		used, warning, err := t.applyTransition(ctx, externalID, issue.Status, offered.text)
+		if err != nil {
+			// Links were applied; record them, and leave comments for the retry.
+			rc.comments, rc.closeComment = nil, ""
+			t.recordPushedRelations(ctx, issue, rc)
+			return nil, err
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+		if used {
+			rc.sentWithTransition = offered
+		}
+	}
 	if err := t.applyComments(ctx, externalID, rc); err != nil {
 		return nil, err
 	}
 	t.recordPushedRelations(ctx, issue, rc)
-	if statusChanged {
-		if err := t.applyTransition(ctx, externalID, issue.Status); err != nil {
-			return nil, err
-		}
-	}
 
 	// Re-fetch to return the state after the update.
 	current, err = t.client.GetIssue(ctx, externalID)
@@ -537,31 +549,84 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	return &ti, nil
 }
 
-// applyTransition finds and applies the Jira workflow transition matching the given beads status.
-// If no matching transition is available (e.g., the issue is already in the target state or the
-// workflow doesn't permit the path), it silently succeeds.
-func (t *Tracker) applyTransition(ctx context.Context, key string, status types.Status) error {
+// applyTransition finds and applies the Jira workflow transition matching the
+// given beads status (see pickTransition). When the workflow rejects the
+// transition because it requires a comment (a validator Jira reports only by
+// rejecting), it retries once with comment, if one was offered, and reports
+// usedComment. When no transition fits, or a required comment is missing, the
+// status is left unchanged and a warning says why.
+func (t *Tracker) applyTransition(ctx context.Context, key string, status types.Status, comment string) (usedComment bool, warning string, err error) {
 	mapper := t.FieldMapper()
 	desiredName, ok := mapper.StatusToTracker(status).(string)
 	if !ok || desiredName == "" {
-		return nil
+		return false, "", nil
 	}
 
 	transitions, err := t.client.GetIssueTransitions(ctx, key)
 	if err != nil {
-		return err
+		return false, "", err
 	}
 
+	tr, ok := pickTransition(transitions, desiredName, status)
+	if !ok {
+		var names []string
+		for _, tr := range transitions {
+			names = append(names, fmt.Sprintf("%q", tr.To.Name))
+		}
+		return false, fmt.Sprintf("%s: status not changed: no transition to %q from its current status (available: %s); set jira.status_map.%s to one of them",
+			key, desiredName, strings.Join(names, ", "), status), nil
+	}
+
+	fields := t.transitionFields(ctx, tr)
+	debug.Logf("jira: transition %s via %q to %q fields=%v\n", key, tr.Name, tr.To.Name, fields)
+	err = t.client.TransitionIssueWithFields(ctx, key, tr.ID, fields, "")
+	if err == nil || !commentRequired(err) {
+		return false, "", err
+	}
+	if strings.TrimSpace(comment) == "" {
+		return false, fmt.Sprintf("%s: status not changed: the %q transition requires a comment; add one with `bd comment` and push again", key, tr.Name), nil
+	}
+	debug.Logf("jira: transition %s via %q requires a comment; retrying with it\n", key, tr.Name)
+	if err := t.client.TransitionIssueWithFields(ctx, key, tr.ID, fields, comment); err != nil {
+		return false, "", err
+	}
+	return true, "", nil
+}
+
+// pickTransition chooses the transition to the status named desired. When no
+// transition goes to that name (workflows name statuses differently: "Open"
+// rather than "To Do"), it falls back to the one transition whose target is in
+// the status category matching the beads status, if exactly one is.
+func pickTransition(transitions []Transition, desired string, status types.Status) (Transition, bool) {
 	for _, tr := range transitions {
-		if strings.EqualFold(tr.To.Name, desiredName) {
-			fields := t.transitionFields(ctx, tr)
-			debug.Logf("jira: transition %s via %q to %q fields=%v\n", key, tr.Name, tr.To.Name, fields)
-			return t.client.TransitionIssueWithFields(ctx, key, tr.ID, fields)
+		if strings.EqualFold(tr.To.Name, desired) {
+			return tr, true
 		}
 	}
+	category := map[types.Status]string{
+		types.StatusOpen:       "new",
+		types.StatusInProgress: "indeterminate",
+		types.StatusClosed:     "done",
+	}[status]
+	if category == "" {
+		return Transition{}, false
+	}
+	var match []Transition
+	for _, tr := range transitions {
+		if tr.To.StatusCategory != nil && tr.To.StatusCategory.Key == category {
+			match = append(match, tr)
+		}
+	}
+	if len(match) != 1 {
+		return Transition{}, false
+	}
+	return match[0], true
+}
 
-	debug.Logf("jira: no available transition to %q for %s (%d transitions checked)\n", desiredName, key, len(transitions))
-	return nil
+// commentRequired reports whether a transition was rejected for lacking a
+// comment, e.g. 400 {"errors":{"comment":"Comment is mandatory"}}.
+func commentRequired(err error) bool {
+	return err != nil && strings.Contains(err.Error(), `"comment":`)
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {

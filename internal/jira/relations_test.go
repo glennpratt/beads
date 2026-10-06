@@ -291,6 +291,102 @@ func TestPushComments(t *testing.T) {
 	}
 }
 
+// A reopen whose workflow names the status "Open" (not the default "To Do")
+// and requires a comment: the transition is found by status category and
+// retried with the pending comment, which is not posted a second time.
+func TestPushTransitionRequiresComment(t *testing.T) {
+	var mu sync.Mutex
+	var transitions, posted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/transitions"):
+			_, _ = w.Write([]byte(`{"transitions":[
+				{"id":"3","name":"Start","to":{"name":"In Progress","statusCategory":{"key":"indeterminate"}}},
+				{"id":"5","name":"Reopen","to":{"name":"Open","statusCategory":{"key":"new"}}}]}`))
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"key":"P-1","fields":{"summary":"s","issuetype":{"name":"Story"},"status":{"name":"Closed","statusCategory":{"key":"done"}}}}`))
+		case strings.HasSuffix(r.URL.Path, "/transitions"):
+			transitions = append(transitions, string(body))
+			if !strings.Contains(string(body), `"update"`) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"errorMessages":[],"errors":{"comment":"Comment is mandatory"}}`))
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/comment"):
+			posted = append(posted, string(body))
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	st := &commentStore{relStore: newRelStore(), comments: map[string][]*types.Comment{}}
+	a := st.bead("a", "P-1", types.TypeStory, `{"jira_parents":[],"jira_links":[]}`)
+	a.Title, a.Status, a.Priority = "s", types.StatusOpen, 2
+	tr := relTracker(st.relStore)
+	tr.store = st
+	tr.client, tr.apiVersion, tr.typeMap = newTestClient(srv.URL, "2"), "2", map[string]string{"story": "Story"}
+
+	// Without a comment to offer: no error, a warning, status unchanged.
+	ti, err := tr.UpdateIssue(context.Background(), "P-1", a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ti.Warnings) != 1 || !strings.Contains(ti.Warnings[0], "requires a comment") {
+		t.Errorf("warnings = %v", ti.Warnings)
+	}
+
+	// With a pending comment: retried with it, and it is not posted again.
+	transitions = nil
+	st.comments["a"] = []*types.Comment{{ID: "c1", Text: "reopening: not a duplicate"}}
+	if ti, err = tr.UpdateIssue(context.Background(), "P-1", a); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"transition":{"id":"5"}}`,
+		`{"transition":{"id":"5"},"update":{"comment":[{"add":{"body":"reopening: not a duplicate"}}]}}`,
+	}
+	if !reflect.DeepEqual(transitions, want) {
+		t.Errorf("transitions:\n%s\nwant:\n%s", strings.Join(transitions, "\n"), strings.Join(want, "\n"))
+	}
+	if len(posted) != 0 || len(ti.Warnings) != 0 {
+		t.Errorf("posted = %v, warnings = %v; want neither", posted, ti.Warnings)
+	}
+	a.Metadata = st.updates["a"]["metadata"].(json.RawMessage)
+	if rc := tr.relationDiff(context.Background(), a); !rc.empty() {
+		t.Errorf("after push: %v", rc.describe())
+	}
+}
+
+func TestPickTransition(t *testing.T) {
+	cat := func(k string) *StatusCategoryField { return &StatusCategoryField{Key: k} }
+	trs := []Transition{
+		{ID: "1", To: StatusField{Name: "Open", StatusCategory: cat("new")}},
+		{ID: "2", To: StatusField{Name: "Closed", StatusCategory: cat("done")}},
+		{ID: "3", To: StatusField{Name: "Cancelled", StatusCategory: cat("done")}},
+	}
+	for _, tc := range []struct {
+		desired string
+		status  types.Status
+		want    string // "" = none
+	}{
+		{"closed", types.StatusClosed, "2"},         // by name, case-insensitive
+		{"To Do", types.StatusOpen, "1"},            // the only "new" one
+		{"Done", types.StatusClosed, ""},            // two "done": ambiguous
+		{"In Progress", types.StatusInProgress, ""}, // none
+	} {
+		tr, ok := pickTransition(trs, tc.desired, tc.status)
+		if got := map[bool]string{true: tr.ID}[ok]; got != tc.want {
+			t.Errorf("pickTransition(%q, %s) = %q, want %q", tc.desired, tc.status, got, tc.want)
+		}
+	}
+}
+
 func TestCreateIssueCreatesLinks(t *testing.T) {
 	var mu sync.Mutex
 	var calls []string
