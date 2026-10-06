@@ -43,6 +43,10 @@ type relationChanges struct {
 	comments     []*types.Comment // local comments not yet pushed
 	closeComment string           // close reason to post with a close transition
 
+	// sentWithTransition is the comment already sent as part of a status
+	// transition that required one; applyComments skips it.
+	sentWithTransition offeredComment
+
 	parentChanged bool
 	newParent     string // "" clears
 	parentField   string // custom field ID, or "parent" (Cloud)
@@ -522,14 +526,39 @@ func snippet(s string) string {
 	return s
 }
 
-// applyComments posts pending comments to externalID.
+// offeredComment is a comment a status transition may carry: the close
+// reason (close true) or a pending comment (id).
+type offeredComment struct {
+	text  string
+	id    string
+	close bool
+}
+
+// transitionComment is the comment to offer a transition that requires one:
+// the close reason if any, else the newest pending comment.
+func (rc *relationChanges) transitionComment() offeredComment {
+	if rc.closeComment != "" {
+		return offeredComment{text: rc.closeComment, close: true}
+	}
+	if n := len(rc.comments); n > 0 && rc.comments[n-1] != nil {
+		return offeredComment{text: rc.comments[n-1].Text, id: rc.comments[n-1].ID}
+	}
+	return offeredComment{}
+}
+
+// applyComments posts pending comments to externalID, except one already
+// sent with a transition.
 func (t *Tracker) applyComments(ctx context.Context, externalID string, rc *relationChanges) error {
+	sent := rc.sentWithTransition
 	for _, c := range rc.comments {
+		if sent.id != "" && c.ID == sent.id {
+			continue
+		}
 		if err := t.client.AddComment(ctx, externalID, c.Text); err != nil {
 			return err
 		}
 	}
-	if rc.closeComment != "" {
+	if rc.closeComment != "" && !sent.close {
 		if err := t.client.AddComment(ctx, externalID, rc.closeComment); err != nil {
 			return err
 		}

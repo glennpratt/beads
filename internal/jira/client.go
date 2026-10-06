@@ -603,17 +603,22 @@ func (c *Client) GetIssueTransitions(ctx context.Context, key string) ([]Transit
 
 // TransitionIssue moves a Jira issue to a new status using the given transition ID.
 func (c *Client) TransitionIssue(ctx context.Context, key, transitionID string) error {
-	return c.TransitionIssueWithFields(ctx, key, transitionID, nil)
+	return c.TransitionIssueWithFields(ctx, key, transitionID, nil, "")
 }
 
 // TransitionIssueWithFields applies a transition, setting screen fields such
-// as a required resolution.
-func (c *Client) TransitionIssueWithFields(ctx context.Context, key, transitionID string, fields map[string]interface{}) error {
+// as a required resolution, and adding comment with it when non-empty.
+func (c *Client) TransitionIssueWithFields(ctx context.Context, key, transitionID string, fields map[string]interface{}, comment string) error {
 	payload := map[string]interface{}{
 		"transition": map[string]string{"id": transitionID},
 	}
 	if len(fields) > 0 {
 		payload["fields"] = fields
+	}
+	if comment != "" {
+		payload["update"] = map[string]interface{}{
+			"comment": []map[string]interface{}{{"add": map[string]string{"body": comment}}},
+		}
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
