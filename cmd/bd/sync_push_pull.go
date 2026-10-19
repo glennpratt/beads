@@ -236,6 +236,9 @@ func outputSyncResult(result *tracker.SyncResult, dryRun bool) {
 	if result.Stats.Pushed > 0 {
 		fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
 	}
+	if !dryRun && result.Stats.Pulled == 0 && result.Stats.Pushed == 0 {
+		fmt.Println("✓ Already up to date")
+	}
 	if dryRun {
 		fmt.Println("\nRun without --dry-run to apply changes")
 	}
@@ -365,6 +368,9 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := rootCtx
+	if err := jiraDoltPullBefore(ctx, true, dryRun, args); err != nil {
+		return HandleError("%v", err)
+	}
 	jt := &jira.Tracker{}
 	if err := jt.Init(ctx, trackerStore); err != nil {
 		return HandleError("initializing Jira tracker: %v", err)
@@ -383,6 +389,9 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 	})
 	if err != nil {
 		return HandleError("sync failed: %v", err)
+	}
+	if !dryRun {
+		jiraDoltPushAfter(ctx)
 	}
 	outputSyncResult(result, dryRun)
 	return nil
@@ -413,6 +422,9 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := rootCtx
+	if err := jiraDoltPullBefore(ctx, false, dryRun, nil); err != nil {
+		return HandleError("%v", err)
+	}
 	jt := &jira.Tracker{}
 	if err := jt.Init(ctx, trackerStore); err != nil {
 		return HandleError("initializing Jira tracker: %v", err)

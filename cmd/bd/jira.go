@@ -188,6 +188,12 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
+	// Neither flag means both directions.
+	pushing := push || !pull
+	if err := jiraDoltPullBefore(ctx, pushing, dryRun, opts.IssueIDs); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
 	if preferLocal {
 		opts.ConflictResolution = tracker.ConflictLocal
 	} else if preferJira {
@@ -205,6 +211,9 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 			return SilentExit()
 		}
 		return HandleError("%v", err)
+	}
+	if pushing && !dryRun {
+		jiraDoltPushAfter(ctx)
 	}
 
 	if jsonOutput {
