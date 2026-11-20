@@ -421,10 +421,17 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 	mapper := t.FieldMapper()
 	fields := mapper.IssueToTracker(issue)
 
-	fields["project"] = map[string]string{"key": t.targetProject(ctx, issue)}
+	project := t.targetProject(ctx, issue)
+	fields["project"] = map[string]string{"key": project}
 	warnings := t.applyCreateHierarchy(ctx, issue, fields)
 	for k, v := range extraCreateFields(issue) {
 		fields[k] = v
+	}
+	// The preview's check, enforced: fail with its message (which lists a
+	// select's options) rather than Jira's "Option id 'null' is not valid".
+	// It also canonicalizes select values to option IDs.
+	if problems := t.createCheck(ctx, project, fields); len(problems) > 0 {
+		return nil, fmt.Errorf("not created: %s", strings.Join(problems, "; "))
 	}
 	debug.Logf("jira: create %s fields: %s\n", issue.ID, strings.Join(sortedKeys(fields), ","))
 

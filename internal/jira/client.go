@@ -395,6 +395,33 @@ type CreateField struct {
 	Name            string `json:"name"`
 	Required        bool   `json:"required"`
 	HasDefaultValue bool   `json:"hasDefaultValue"`
+	Schema          struct {
+		Type  string `json:"type"`  // "option" for a select; "array" for multi-selects
+		Items string `json:"items"` // element type of an array, e.g. "option"
+	} `json:"schema"`
+	AllowedValues []AllowedValue `json:"allowedValues"`
+}
+
+// AllowedValue is one allowed value of a create field: a select option has
+// an ID and a value; other kinds (components, versions) have a name.
+type AllowedValue struct {
+	ID    string `json:"id"`
+	Value string `json:"value"`
+	Name  string `json:"name"`
+}
+
+// Label is how the value reads in Jira.
+func (a AllowedValue) Label() string {
+	if a.Value != "" {
+		return a.Value
+	}
+	return a.Name
+}
+
+// IsSelect reports whether the field is a single or multi select, the kind
+// whose values must be one of AllowedValues.
+func (f CreateField) IsSelect() bool {
+	return len(f.AllowedValues) > 0 && (f.Schema.Type == "option" || (f.Schema.Type == "array" && f.Schema.Items == "option"))
 }
 
 // GetCreateFields lists the create-screen fields for a project and issue
