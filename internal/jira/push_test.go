@@ -106,7 +106,7 @@ func (rj *recordingJira) server(t *testing.T) *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/field"):
 			_, _ = w.Write([]byte(`[]`))
 		case strings.HasSuffix(r.URL.Path, "/issuetypes"):
-			_, _ = w.Write([]byte(`{"values":[{"id":"7","name":"Story","subtask":false},{"id":"8","name":"Approval","subtask":true},{"id":"5","name":"Technical Sub-task","subtask":true},{"id":"9","name":"Sub-task","subtask":true}]}`))
+			_, _ = w.Write([]byte(`{"values":[{"id":"7","name":"Story","subtask":false},{"id":"10","name":"Epic","subtask":false},{"id":"3","name":"Task","subtask":false},{"id":"1","name":"Bug","subtask":false},{"id":"12","name":"Capability","subtask":false},{"id":"8","name":"Approval","subtask":true},{"id":"5","name":"Technical Sub-task","subtask":true},{"id":"9","name":"Sub-task","subtask":true}]}`))
 		case r.Method == http.MethodGet:
 			_, _ = w.Write([]byte(rj.issue))
 		case r.Method == http.MethodPut:
@@ -457,7 +457,7 @@ func TestCreateTargetProjectAndCheck(t *testing.T) {
 		t.Errorf("target project = %q, want OTHER", got)
 	}
 	got := tr.DescribeCreate(context.Background(), task)
-	if !strings.Contains(got, "in OTHER") || !strings.Contains(got, "requires: Component Owner (customfield_9)") || strings.Contains(got, "Priority") {
+	if !strings.Contains(got, "in OTHER") || !strings.Contains(got, "requires Component Owner (customfield_9)") || strings.Contains(got, "Priority") {
 		t.Errorf("describe = %q", got)
 	}
 
@@ -469,5 +469,71 @@ func TestCreateTargetProjectAndCheck(t *testing.T) {
 	story := &types.Issue{ID: "gp-2", Title: "s", IssueType: types.TypeStory, Metadata: json.RawMessage(`{"jira_project":"OTHER"}`)}
 	if got := tr.DescribeCreate(context.Background(), story); !strings.Contains(got, `OTHER has no issue type "Story" (has: Task)`) {
 		t.Errorf("missing type not reported: %q", got)
+	}
+}
+
+// A required select: the preview lists its options when it is missing or
+// set to a value that isn't one; any spelling of an option is accepted and
+// sent as its ID; and the create itself refuses before calling Jira.
+func TestCreateCheckSelectOptions(t *testing.T) {
+	var created []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/createmeta/P/issuetypes"):
+			_, _ = w.Write([]byte(`{"values":[{"id":"1","name":"Bug","subtask":false}]}`))
+		case strings.HasSuffix(r.URL.Path, "/createmeta/P/issuetypes/1"):
+			_, _ = w.Write([]byte(`{"values":[
+				{"fieldId":"summary","name":"Summary","required":true},
+				{"fieldId":"customfield_14747","name":"Detection Environment","required":true,
+				 "schema":{"type":"option"},
+				 "allowedValues":[{"id":"14540","value":"Production"},{"id":"34203","value":"DevQA"}]},
+				{"fieldId":"customfield_7","name":"Platforms","required":false,
+				 "schema":{"type":"array","items":"option"},
+				 "allowedValues":[{"id":"1","value":"Linux"},{"id":"2","value":"macOS"}]}]}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/issue"):
+			body, _ := io.ReadAll(r.Body)
+			created = append(created, string(body))
+			w.WriteHeader(http.StatusBadRequest)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	tr := &Tracker{client: newTestClient(srv.URL, "2"), store: &depStore{configStore: &configStore{data: map[string]string{}}}, projectKeys: []string{"P"}, hierarchyResolved: true}
+	bug := func(fields string) *types.Issue {
+		return &types.Issue{ID: "gp-1", Title: "b", IssueType: types.TypeBug, Metadata: json.RawMessage(`{"jira_fields":` + fields + `}`)}
+	}
+	ctx := context.Background()
+
+	got := tr.DescribeCreate(ctx, bug(`{}`))
+	if !strings.Contains(got, "requires Detection Environment (customfield_14747; one of: Production, DevQA)") {
+		t.Errorf("missing select: %q", got)
+	}
+	got = tr.DescribeCreate(ctx, bug(`{"customfield_14747":{"value":"DevCloud"}}`))
+	if !strings.Contains(got, `Detection Environment (customfield_14747; one of: Production, DevQA): "DevCloud" is not an option`) {
+		t.Errorf("bad option: %q", got)
+	}
+	if _, err := tr.CreateIssue(ctx, bug(`{"customfield_14747":{"value":"DevCloud"}}`)); err == nil || !strings.Contains(err.Error(), "not created") || len(created) != 0 {
+		t.Errorf("create with a bad option: err %v, sent %v; want refused before Jira", err, created)
+	}
+
+	// jira_fields as a JSON string (bd update --set-metadata 'jira_fields={...}').
+	if got := tr.DescribeCreate(ctx, bug(`"{\"customfield_14747\":\"DevQA\"}"`)); strings.Contains(got, "Detection Environment") {
+		t.Errorf("string jira_fields not used: %q", got)
+	}
+
+	for _, v := range []string{`"devqa"`, `{"value":"DevQA"}`, `{"id":"34203"}`, `{"name":"DEVQA"}`} {
+		fields := map[string]interface{}{"issuetype": map[string]string{"name": "Bug"}, "summary": "b"}
+		_ = json.Unmarshal([]byte(`{"customfield_14747":`+v+`,"customfield_7":["linux",{"value":"macOS"}]}`), &fields)
+		fields["issuetype"] = map[string]string{"name": "Bug"}
+		if problems := tr.createCheck(ctx, "P", fields); len(problems) != 0 {
+			t.Errorf("%s: problems %v", v, problems)
+		}
+		if got, want := fields["customfield_14747"], map[string]string{"id": "34203"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: canonical = %v, want %v", v, got, want)
+		}
+		if got, want := fields["customfield_7"], []interface{}{map[string]string{"id": "1"}, map[string]string{"id": "2"}}; !reflect.DeepEqual(got, want) {
+			t.Errorf("multi-select canonical = %v, want %v", got, want)
+		}
 	}
 }

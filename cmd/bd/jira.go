@@ -212,7 +212,7 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		}
 		return HandleError("%v", err)
 	}
-	if pushing && !dryRun {
+	if pushing && !dryRun && result.Stats.Pushed > 0 {
 		jiraDoltPushAfter(ctx)
 	}
 
@@ -239,6 +239,10 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		for _, w := range result.Warnings {
 			fmt.Printf("  - %s\n", w)
 		}
+	}
+	if result.Stats.Errors > 0 {
+		fmt.Printf("✗ %d failed (see the warnings above)\n", result.Stats.Errors)
+		return SilentExit()
 	}
 	return nil
 }

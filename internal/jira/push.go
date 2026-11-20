@@ -441,23 +441,37 @@ func (t *Tracker) targetProject(ctx context.Context, issue *types.Issue) string 
 
 // extraCreateFields returns metadata jira_fields: raw Jira field values
 // (by field ID or system name) merged into the create payload, e.g.
-// {"components": [{"name": "IPAM"}]}.
+// {"components": [{"name": "IPAM"}]}. jira_fields may also be a string
+// holding that JSON object, which is how
+// `bd update --set-metadata 'jira_fields={...}'` stores it.
 func extraCreateFields(issue *types.Issue) map[string]interface{} {
 	if len(issue.Metadata) == 0 {
 		return nil
 	}
 	var m struct {
-		Fields map[string]interface{} `json:"jira_fields"`
+		Fields json.RawMessage `json:"jira_fields"`
 	}
-	if json.Unmarshal(issue.Metadata, &m) != nil {
+	if json.Unmarshal(issue.Metadata, &m) != nil || len(m.Fields) == 0 {
 		return nil
 	}
-	return m.Fields
+	raw := []byte(m.Fields)
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		raw = []byte(s)
+	}
+	var fields map[string]interface{}
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil
+	}
+	return fields
 }
 
 // createCheck reports problems a create would hit in project: an issue type
-// the project lacks, or required fields without a default that the payload
-// does not set. Results are cached per project and type.
+// the project lacks, required fields without a default that the payload does
+// not set, and select values that are not one of the field's options. A
+// select value given by option value, name or ID (any case, or as a plain
+// string) is rewritten in fields to the option's canonical {"id": ...}.
+// Create metadata is cached per project and type.
 func (t *Tracker) createCheck(ctx context.Context, project string, fields map[string]interface{}) []string {
 	if t.client == nil || project == "" {
 		return nil
@@ -504,17 +518,98 @@ func (t *Tracker) createCheck(ctx context.Context, project string, fields map[st
 		}
 		t.createFields[cacheKey] = cfs
 	}
-	var missing []string
+	var missing, problems []string
 	for _, f := range cfs {
-		if !f.Required || f.HasDefaultValue {
+		v, present := fields[f.FieldID]
+		if !present {
+			if f.Required && !f.HasDefaultValue {
+				missing = append(missing, describeField(f))
+			}
 			continue
 		}
-		if _, ok := fields[f.FieldID]; !ok {
-			missing = append(missing, f.Name+" ("+f.FieldID+")")
+		if !f.IsSelect() {
+			continue
 		}
+		canon, bad := matchSelect(f, v)
+		if bad != "" {
+			problems = append(problems, fmt.Sprintf("%s: %q is not an option", describeField(f), bad))
+			continue
+		}
+		fields[f.FieldID] = canon
 	}
-	if len(missing) == 0 {
+	if len(missing) > 0 {
+		problems = append([]string{fmt.Sprintf("%s %s requires %s", project, typeName, strings.Join(missing, ", "))}, problems...)
+	}
+	if len(problems) == 0 {
 		return nil
 	}
-	return []string{fmt.Sprintf("%s %s requires: %s (set with metadata jira_fields)", project, typeName, strings.Join(missing, ", "))}
+	return []string{strings.Join(problems, "; ") +
+		` (set metadata jira_fields, e.g. {"customfield_12345": "Option"}; a select takes an option's value, name or ID)`}
+}
+
+// describeField names a create field for messages, with its options when it
+// is a select: `Detection Environment (customfield_14747; one of: A, B)`.
+func describeField(f CreateField) string {
+	if !f.IsSelect() {
+		return f.Name + " (" + f.FieldID + ")"
+	}
+	labels := make([]string, 0, len(f.AllowedValues))
+	for _, a := range f.AllowedValues {
+		labels = append(labels, a.Label())
+	}
+	return f.Name + " (" + f.FieldID + "; one of: " + strings.Join(labels, ", ") + ")"
+}
+
+// matchSelect resolves a select field's value to its canonical form,
+// {"id": "..."} (or a list of them for a multi-select). An option matches by
+// ID, value or name, case-insensitively; v may be a plain string or an object
+// with "id", "value" or "name". It returns the first unmatched value instead
+// when one isn't an option.
+func matchSelect(f CreateField, v interface{}) (interface{}, string) {
+	one := func(x interface{}) (interface{}, string) {
+		var want []string
+		switch t := x.(type) {
+		case string:
+			want = []string{t}
+		case map[string]interface{}:
+			for _, k := range []string{"id", "value", "name"} {
+				if s, ok := t[k].(string); ok {
+					want = append(want, s)
+				}
+			}
+		case map[string]string:
+			for _, k := range []string{"id", "value", "name"} {
+				if s, ok := t[k]; ok {
+					want = append(want, s)
+				}
+			}
+		}
+		for _, w := range want {
+			for _, a := range f.AllowedValues {
+				if strings.EqualFold(strings.TrimSpace(w), a.ID) || strings.EqualFold(strings.TrimSpace(w), a.Label()) {
+					return map[string]string{"id": a.ID}, ""
+				}
+			}
+		}
+		if len(want) == 0 {
+			return nil, fmt.Sprint(x)
+		}
+		return nil, want[0]
+	}
+	if f.Schema.Type != "array" {
+		return one(v)
+	}
+	items, ok := v.([]interface{})
+	if !ok {
+		items = []interface{}{v}
+	}
+	out := make([]interface{}, 0, len(items))
+	for _, x := range items {
+		c, bad := one(x)
+		if bad != "" {
+			return nil, bad
+		}
+		out = append(out, c)
+	}
+	return out, ""
 }

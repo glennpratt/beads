@@ -236,7 +236,9 @@ func outputSyncResult(result *tracker.SyncResult, dryRun bool) {
 	if result.Stats.Pushed > 0 {
 		fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
 	}
-	if !dryRun && result.Stats.Pulled == 0 && result.Stats.Pushed == 0 {
+	if result.Stats.Errors > 0 {
+		fmt.Printf("✗ %d failed (see the warnings above)\n", result.Stats.Errors)
+	} else if !dryRun && result.Stats.Pulled == 0 && result.Stats.Pushed == 0 {
 		fmt.Println("✓ Already up to date")
 	}
 	if dryRun {
@@ -390,10 +392,13 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return HandleError("sync failed: %v", err)
 	}
-	if !dryRun {
+	if !dryRun && result.Stats.Pushed > 0 {
 		jiraDoltPushAfter(ctx)
 	}
 	outputSyncResult(result, dryRun)
+	if result.Stats.Errors > 0 {
+		return SilentExit()
+	}
 	return nil
 }
 
@@ -447,6 +452,9 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 		return HandleError("sync failed: %v", err)
 	}
 	outputSyncResult(result, dryRun)
+	if result.Stats.Errors > 0 {
+		return SilentExit()
+	}
 	return nil
 }
 
