@@ -3,6 +3,7 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1073,13 +1074,25 @@ func TestFetchIssuesMatchesSinceToSinceGranularity(t *testing.T) {
 		return capturedJQL
 	}
 
-	since := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	floor := since.Truncate(tr.SinceGranularity())
-	if got, want := jqlFrom(since), jqlFrom(floor); got != want {
-		t.Fatalf("JQL from %s = %q, want the JQL from %s: %q", since, got, floor, want)
-	}
-	if before := jqlFrom(floor.Add(-time.Nanosecond)); before == jqlFrom(floor) {
-		t.Fatalf("JQL from just before %s = %q, the same as from it: SinceGranularity is finer than the JQL", floor, before)
+	// The JQL is a relative window ("-Nm", see updatedSinceJQL), so the
+	// contract to check is coverage: the window starts at or before Since
+	// truncated to SinceGranularity, whatever second Since falls on.
+	base := time.Now().Add(-90 * time.Minute).Truncate(time.Minute)
+	for _, since := range []time.Time{base, base.Add(time.Nanosecond), base.Add(30 * time.Second), base.Add(time.Minute - time.Nanosecond)} {
+		jql := jqlFrom(since)
+		after := time.Now()
+		var minutes int
+		i := strings.Index(jql, `updated >= "-`)
+		if i < 0 {
+			t.Fatalf("JQL %q has no relative updated clause", jql)
+		}
+		if _, err := fmt.Sscanf(jql[i:], `updated >= "-%dm"`, &minutes); err != nil {
+			t.Fatalf("JQL %q: %v", jql, err)
+		}
+		floor := since.Truncate(tr.SinceGranularity())
+		if start := after.Add(-time.Duration(minutes) * time.Minute); start.After(floor) {
+			t.Errorf("JQL from %s = %q starts at %s, after %s: SinceGranularity is finer than the JQL", since, jql, start, floor)
+		}
 	}
 }
 

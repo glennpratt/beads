@@ -25,6 +25,8 @@ func (s *jiraHookStore) GetAllConfig(_ context.Context) (map[string]string, erro
 
 func TestJiraPushHooksLabelGate(t *testing.T) {
 	t.Setenv("JIRA_API_TOKEN", "tok")
+	// A Jira URL from the environment is trusted without a workspace pin.
+	t.Setenv("JIRA_URL", "https://jira.example.com")
 	ctx := context.Background()
 	linked := "https://jira.example.com/browse/P-1"
 	other := "https://github.com/o/r/issues/1"
